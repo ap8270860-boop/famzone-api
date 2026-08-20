@@ -8,7 +8,7 @@
                         <img src="/back/assets/images/logo-sm.svg" alt="" height="24">
                     </span>
                     <span class="logo-lg">
-                        <img src="/back/assets/images/logo-sm.svg" alt="" height="24"> <span class="logo-txt">FAMZONE</span>
+                        <img src="/back/assets/images/logo-sm.svg" alt="" height="24"> <span class="logo-txt">SFAMILY</span>
                     </span>
                 </a>
 
@@ -17,7 +17,7 @@
                         <img src="/back/assets/images/logo-sm.svg" alt="" height="24">
                     </span>
                     <span class="logo-lg">
-                        <img src="/back/assets/images/logo-sm.svg" alt="" height="24"> <span class="logo-txt">FAMZONE</span>
+                        <img src="/back/assets/images/logo-sm.svg" alt="" height="24"> <span class="logo-txt">SFAMILY</span>
                     </span>
                 </a>
             </div>

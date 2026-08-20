@@ -8,13 +8,13 @@
     <div class="d-flex flex-column h-100">
         <div class="mb-4 mb-md-5 text-center">
             <a href="index.html" class="d-block auth-logo">
-                <img src="/back/assets/images/logo-sm.svg" alt="" height="28"> <span class="logo-txt">FAMZONE</span>
+                <img src="/back/assets/images/logo-sm.svg" alt="" height="28"> <span class="logo-txt">SFAMILY</span>
             </a>
         </div>
         <div class="auth-content my-auto">
             <div class="text-center">
                 <h5 class="mb-0">Welcome Back !</h5>
-                <p class="text-muted mt-2">Sign in to continue to SavvyDeals.</p>
+                <p class="text-muted mt-2">Sign in to continue to SFAMILY.</p>
             </div>
             <form class="mt-4 pt-2" action="{{ route('admin.login_handler') }}" method="POST">
                 <x-form-alerts></x-form-alerts>
@@ -49,7 +49,7 @@
 
         </div>
         <div class="mt-4 mt-md-5 text-center">
-            <p class="mb-0">© <script>document.write(new Date().getFullYear())</script> SAVVY DEALS.</p>
+            <p class="mb-0">© <script>document.write(new Date().getFullYear())</script> SFAMILY.</p>
         </div>
     </div>
 </div>
