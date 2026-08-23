@@ -26,7 +26,14 @@ class UpdatePasswordRequest extends FormRequest
             ],
             'password' => [
                 'required', 'string', 'confirmed',
-                Password::min(8)->letters()->numbers()->uncompromised(),
+                Password::min(8)
+                    ->letters()
+                    ->numbers()
+                    // Checks the password against known breach corpora via
+                    // Have I Been Pwned (k-anonymity — only a 5-character
+                    // hash prefix leaves the server, never the password).
+                    // Fails open if the service is unreachable.
+                    ->uncompromised(),
             ],
         ];
     }
@@ -39,6 +46,14 @@ class UpdatePasswordRequest extends FormRequest
         return [
             'password.confirmed' => 'The two passwords do not match.',
             'current_password.required' => 'Enter your current password.',
+
+            // Laravel's defaults for these are vague. Say what is actually
+            // wrong so the user can fix it in one attempt.
+            'password.min' => 'Use at least 8 characters.',
+            'password.letters' => 'Include at least one letter.',
+            'password.numbers' => 'Include at least one number.',
+            'password.uncompromised' => 'That password has appeared in a known '
+                .'data breach. Pick a different one.',
         ];
     }
 }
