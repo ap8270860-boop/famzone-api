@@ -15,6 +15,7 @@ use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Str;
 
 /**
@@ -95,6 +96,14 @@ class User extends Authenticatable
 
     /** Free AI assistant messages before the paywall. */
     public const AI_FREE_MESSAGE_LIMIT = 5;
+
+    /**
+     * How long an avatar link stays valid.
+     *
+     * Short enough that a leaked link goes stale, long enough that a client
+     * which opened the app in the morning still renders at lunchtime.
+     */
+    public const MEDIA_LINK_HOURS = 6;
 
     /**
      * Get the attributes that should be cast.
@@ -196,29 +205,38 @@ class User extends Authenticatable
         );
     }
 
-    /** Public URL for the avatar, or null when none is set. */
+    /** Link to the avatar, or null when none is set. */
     protected function avatarUrl(): Attribute
     {
-        return Attribute::get(fn (): ?string => $this->urlFor($this->avatar_path));
+        return Attribute::get(
+            fn (): ?string => $this->mediaUrl('primary', $this->avatar_path),
+        );
     }
 
-    /** Public URL for the decoy avatar shown outside the user's circles. */
+    /** Link to the decoy avatar shown outside the user's circles. */
     protected function alternateAvatarUrl(): Attribute
     {
         return Attribute::get(
-            fn (): ?string => $this->urlFor($this->alternate_avatar_path),
+            fn (): ?string => $this->mediaUrl('alternate', $this->alternate_avatar_path),
         );
     }
 
     /**
-     * Build a URL for a stored object.
+     * Build a link the app can hand straight to an <img> tag.
      *
-     * S3 gets a short-lived signed URL so avatars are not world-readable;
-     * the local and public disks have no signing, so they get a plain URL.
-     * Calling temporaryUrl() on a disk that cannot sign throws, which is why
-     * this branches rather than always signing.
+     * Avatars are stored privately and must stay that way — this is a safety
+     * app, and the alternate-avatar feature exists precisely so that a real
+     * photo is not visible to everyone. So there is no public URL to hand out.
+     *
+     * S3 can sign a link directly to the object, which is the cheapest path:
+     * the file is served without PHP in the way. Local disks cannot sign, and
+     * their root (storage/app/private) is not served by nginx at all, so they
+     * get a signed link to a route that streams the file instead.
+     *
+     * Either way the link expires, which is why clients must re-read it from
+     * /me rather than caching it in their own storage.
      */
-    protected function urlFor(?string $path): ?string
+    protected function mediaUrl(string $slot, ?string $path): ?string
     {
         if ($path === null) {
             return null;
@@ -227,13 +245,19 @@ class User extends Authenticatable
         $disk = Storage::disk(config('filesystems.default'));
 
         try {
-            return $disk->providesTemporaryUrls()
-                ? $disk->temporaryUrl($path, now()->addHour())
-                : $disk->url($path);
+            if ($disk->providesTemporaryUrls()) {
+                return $disk->temporaryUrl($path, now()->addHours(self::MEDIA_LINK_HOURS));
+            }
         } catch (\Throwable) {
-            // A missing or misconfigured disk must not break a profile read.
-            return null;
+            // Fall through — a disk that claims to sign but cannot is still
+            // servable through the streaming route below.
         }
+
+        return URL::temporarySignedRoute(
+            'api.v1.media.avatar',
+            now()->addHours(self::MEDIA_LINK_HOURS),
+            ['uuid' => $this->uuid, 'slot' => $slot],
+        );
     }
 
     /*

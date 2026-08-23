@@ -24,6 +24,7 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
  * The v1 API.
@@ -446,6 +447,49 @@ class V1Controller extends Controller
         }
 
         return $this->ok(new UserResource($user->fresh()), 'Photo removed.');
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Media
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * GET /api/v1/media/avatar/{uuid}/{slot}   (signed)
+     *
+     * Streams a stored avatar.
+     *
+     * Avatars live under storage/app/private, which nginx does not serve, and
+     * that is deliberate — a safety app should not put members' faces behind
+     * guessable public URLs. The signature on this route is the credential,
+     * not the bearer token, so the link can be handed straight to an <img>
+     * tag or Flutter's Image.network without attaching headers.
+     *
+     * Links expire after User::MEDIA_LINK_HOURS. Clients must re-read them
+     * from /me rather than storing them.
+     */
+    public function streamAvatar(Request $request, string $uuid, string $slot): StreamedResponse
+    {
+        $user = User::where('uuid', $uuid)->first();
+
+        abort_if($user === null, 404);
+
+        $path = $slot === 'alternate'
+            ? $user->alternate_avatar_path
+            : $user->avatar_path;
+
+        abort_if($path === null, 404);
+
+        $disk = Storage::disk(config('filesystems.default'));
+
+        abort_unless($disk->exists($path), 404);
+
+        // Private: the link is per-user and time-limited, so a shared cache
+        // must not hold on to the bytes.
+        return $disk->response($path, null, [
+            'Cache-Control' => 'private, max-age=3600',
+        ]);
     }
 
     /*

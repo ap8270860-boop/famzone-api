@@ -22,6 +22,18 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
     Route::get('ping', [V1Controller::class, 'ping'])->name('ping');
 
     /*
+     | Signed media.
+     |
+     | Not behind auth:sanctum on purpose — the signature in the query string
+     | is the credential. That lets the link go straight into an <img> tag,
+     | which cannot send an Authorization header.
+     */
+    Route::get('media/avatar/{uuid}/{slot}', [V1Controller::class, 'streamAvatar'])
+        ->middleware('signed')
+        ->where('slot', 'primary|alternate')
+        ->name('media.avatar');
+
+    /*
      | Public authentication.
      |
      | Throttled harder than the default: these endpoints send SMS and guess

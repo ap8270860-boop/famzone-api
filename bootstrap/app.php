@@ -19,7 +19,10 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        //
+        // Nginx terminates TLS and proxies to PHP-FPM over http, so without
+        // this Laravel builds http:// URLs for an https:// request. Signed
+        // routes sign the scheme, so a mismatch fails every signature check.
+        $middleware->trustProxies(at: '*');
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(
