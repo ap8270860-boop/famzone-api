@@ -177,8 +177,15 @@ class SafetyService
             }
 
             $locked->checkIns()->create([
+                // The local calendar day this belongs to...
                 'check_in_date' => $today,
-                'checked_in_at' => $now,
+
+                // ...but the instant itself is stored in UTC. Laravel's
+                // datetime cast formats whatever Carbon it is given
+                // without converting the zone, and reads it back as the
+                // app timezone, so handing it a local-zone Carbon writes
+                // a wall clock that is later reinterpreted as UTC.
+                'checked_in_at' => $now->utc(),
                 'status' => $input['status'] ?? SafetyCheckIn::STATUS_SAFE,
                 'source' => $input['source'] ?? SafetyCheckIn::SOURCE_MANUAL,
                 'note' => $input['note'] ?? null,
@@ -202,7 +209,7 @@ class SafetyService
             $streak = $continues ? (int) $locked->check_in_streak + 1 : 1;
 
             $locked->forceFill([
-                'last_check_in_at' => $now,
+                'last_check_in_at' => $now->utc(),
                 'check_in_streak' => $streak,
                 'longest_check_in_streak' => max((int) $locked->longest_check_in_streak, $streak),
             ])->save();
