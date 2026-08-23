@@ -104,7 +104,7 @@ class V1Controller extends Controller
                     'phone_country_code' => $data['phone_country_code'],
                     'phone_number' => $data['phone_number'],
                     'email' => $data['email'] ?? null,
-                    'user_type' => $data['user_type'],
+                    'user_type' => $data['user_type'] ?? User::TYPE_ADULT,
                     'education_stage' => $data['education_stage'] ?? null,
                     'referred_by' => $referrer?->id,
                     'device_token' => $data['device_token'] ?? null,

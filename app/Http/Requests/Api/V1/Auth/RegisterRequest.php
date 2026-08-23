@@ -37,7 +37,13 @@ class RegisterRequest extends FormRequest
                 Rule::unique('users', 'email')->whereNull('deleted_at'),
             ],
 
-            'user_type' => ['required', Rule::in([
+            // Optional at signup — the account type is chosen later, in
+            // the profile. Every new account starts as an adult, which is the
+            // least privileged reading: a kid account implies a guardian, and
+            // guessing that at registration would be wrong more often than
+            // right. Still accepted here so a future onboarding step, or the
+            // web client, can send it without another API change.
+            'user_type' => ['sometimes', 'nullable', Rule::in([
                 User::TYPE_ADULT, User::TYPE_KID, User::TYPE_SENIOR,
             ])],
             'education_stage' => [

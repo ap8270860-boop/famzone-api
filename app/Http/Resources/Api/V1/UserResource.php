@@ -3,6 +3,7 @@
 namespace App\Http\Resources\Api\V1;
 
 use App\Models\User;
+use App\Services\Social\RelationshipService;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -54,6 +55,16 @@ class UserResource extends JsonResource
                 'is_private' => $this->is_private,
                 'emergency_message' => $this->emergency_message,
             ],
+
+            // Followers, following and family. Three indexed counts, resolved
+            // through the same service the public profile uses so the number
+            // on your own profile can never disagree with the one somebody
+            // else sees.
+            //
+            // This resource only ever represents the signed-in user, so there
+            // is no per-row cost here — unlike the list endpoints, which
+            // deliberately omit counts.
+            'counts' => app(RelationshipService::class)->counts($this->resource),
 
             'subscription' => [
                 'is_premium' => $this->hasActiveSubscription(),
