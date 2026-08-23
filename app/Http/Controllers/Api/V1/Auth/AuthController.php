@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\V1\Auth;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Api\V1\Auth\LoginRequest;
 use App\Http\Requests\Api\V1\Auth\RegisterRequest;
 use App\Http\Requests\Api\V1\Auth\SendOtpRequest;
 use App\Http\Requests\Api\V1\Auth\VerifyOtpRequest;
@@ -14,6 +15,8 @@ use App\Services\Otp\OtpService;
 use App\Support\ApiResponse;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\RateLimiter;
 
 /**
  * Phone-first registration and sign-in.
@@ -165,18 +168,105 @@ class AuthController extends Controller
 
         $user->save();
 
-        // A fresh token per verification, and older ones dropped, so a lost
-        // device cannot keep a live session.
-        $user->tokens()->delete();
-        $token = $user->createToken(
-            $request->input('device_id') ?? 'sfamily-app',
-        )->plainTextToken;
+        return $this->ok($this->startSession($user, $request), 'Number verified.');
+    }
 
-        return $this->ok([
+    /**
+     * Record the sign-in, register the device and mint a token.
+     *
+     * @return array<string, mixed>
+     */
+    private function startSession(User $user, $request): array
+    {
+        $user->forceFill([
+            'last_login_at' => now(),
+            'last_login_ip' => $request->ip(),
+        ]);
+
+        if ($request->filled('device_token')) {
+            $user->forceFill([
+                'device_token' => $request->input('device_token'),
+                'device_type' => $request->input('device_type'),
+                'device_id' => $request->input('device_id'),
+            ]);
+        }
+
+        $user->save();
+
+        // One live token per user for now: a fresh sign-in drops the old one,
+        // so a lost device cannot keep a session. Revisit when multi-device
+        // support lands alongside the user_devices table.
+        $user->tokens()->delete();
+
+        return [
             'user' => new UserResource($user),
-            'token' => $token,
+            'token' => $user->createToken(
+                $request->input('device_id') ?? 'sfamily-app',
+            )->plainTextToken,
             'token_type' => 'Bearer',
-        ], 'Number verified.');
+        ];
+    }
+
+    /**
+     * POST /api/v1/auth/login
+     *
+     * Phone plus password, for users who set one. OTP remains the primary
+     * route — see sendOtp/verifyOtp with purpose "login".
+     */
+    public function login(LoginRequest $request): JsonResponse
+    {
+        $countryCode = $request->string('phone_country_code')->toString();
+        $number = $request->string('phone_number')->toString();
+
+        // Per-account throttle on top of the per-IP route limit, so someone
+        // spraying one account from many addresses still gets stopped.
+        $key = 'login:'.$countryCode.$number;
+
+        if (RateLimiter::tooManyAttempts($key, 5)) {
+            return $this->fail(
+                'Too many attempts. Try again in a minute.',
+                ['reason' => 'throttled', 'retry_after' => RateLimiter::availableIn($key)],
+                429,
+            );
+        }
+
+        $user = User::wherePhone($countryCode, $number)->first();
+
+        // Same response whether the number is unknown or the password is
+        // wrong — otherwise this endpoint tells an attacker which numbers
+        // are registered.
+        if ($user === null
+            || blank($user->password)
+            || ! Hash::check($request->string('password')->toString(), $user->password)) {
+            RateLimiter::hit($key, 60);
+
+            return $this->fail(
+                'Those details do not match our records.',
+                ['reason' => 'invalid_credentials'],
+                401,
+            );
+        }
+
+        if ($user->isBanned()) {
+            return $this->fail('This account has been suspended.', null, 403);
+        }
+
+        // An unverified number cannot sign in with a password — finish
+        // verification first, so the account owner proved they hold the SIM.
+        if (! $user->hasVerifiedPhone()) {
+            return $this->fail(
+                'Verify your number to continue.',
+                ['reason' => 'phone_unverified'],
+                403,
+            );
+        }
+
+        RateLimiter::clear($key);
+
+        return $this->ok(
+            $this->startSession($user, $request),
+            'Signed in.',
+        );
     }
 
     /**

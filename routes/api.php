@@ -30,6 +30,7 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
      */
     Route::prefix('auth')->name('auth.')->middleware('throttle:10,1')->group(function () {
         Route::post('register', [AuthController::class, 'register'])->name('register');
+        Route::post('login', [AuthController::class, 'login'])->name('login');
         Route::post('otp/send', [AuthController::class, 'sendOtp'])->name('otp.send');
         Route::post('otp/verify', [AuthController::class, 'verifyOtp'])->name('otp.verify');
     });
