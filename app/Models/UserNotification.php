@@ -18,6 +18,9 @@ class UserNotification extends Model
 {
     public const FOLLOW_REQUESTED = 'follow.requested';
     public const FOLLOW_ACCEPTED = 'follow.accepted';
+
+    /** A public account was followed — nothing to approve. */
+    public const FOLLOW_STARTED = 'follow.started';
     public const FAMILY_INVITED = 'family.invited';
     public const FAMILY_ACCEPTED = 'family.accepted';
 

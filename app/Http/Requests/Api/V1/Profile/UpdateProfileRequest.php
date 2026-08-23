@@ -65,6 +65,7 @@ class UpdateProfileRequest extends FormRequest
             'show_online_status' => ['sometimes', 'boolean'],
             'show_read_receipts' => ['sometimes', 'boolean'],
             'allow_group_invites' => ['sometimes', 'boolean'],
+            'is_private' => ['sometimes', 'boolean'],
             'use_alternate_avatar' => ['sometimes', 'boolean'],
         ];
     }

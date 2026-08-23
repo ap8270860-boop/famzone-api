@@ -200,6 +200,7 @@ class NotificationService
         return match ($n->type) {
             UserNotification::FOLLOW_REQUESTED => $who.' wants to follow you.',
             UserNotification::FOLLOW_ACCEPTED => $who.' accepted your follow request.',
+            UserNotification::FOLLOW_STARTED => $who.' started following you.',
             UserNotification::FAMILY_INVITED => $who.' wants to add you to their family.',
             UserNotification::FAMILY_ACCEPTED => $who.' joined your family.',
             default => 'You have a new notification.',

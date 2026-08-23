@@ -48,6 +48,10 @@ class UserResource extends JsonResource
                 'show_online_status' => $this->show_online_status,
                 'show_read_receipts' => $this->show_read_receipts,
                 'allow_group_invites' => $this->allow_group_invites,
+
+                // Private accounts turn follows into requests. Public
+                // ones let anybody follow instantly and see the profile.
+                'is_private' => $this->is_private,
                 'emergency_message' => $this->emergency_message,
             ],
 

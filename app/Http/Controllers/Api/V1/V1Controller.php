@@ -306,9 +306,26 @@ class V1Controller extends Controller
             $user->email_verified_at = null;
         }
 
+        // Opening a private account accepts everyone already waiting —
+        // otherwise those requests would sit unanswered while new followers
+        // walk straight in.
+        $opened = array_key_exists('is_private', $data)
+            && $user->is_private
+            && $data['is_private'] === false;
+
         $user->fill($data)->save();
 
-        return $this->ok(new UserResource($user->fresh()), 'Profile updated.');
+        $accepted = $opened
+            ? $this->relationships->acceptAllPendingFollows($user->fresh())
+            : 0;
+
+        return $this->ok(
+            new UserResource($user->fresh()),
+            $accepted > 0
+                ? 'Profile updated. '.$accepted.' pending '
+                    .($accepted === 1 ? 'request was' : 'requests were').' accepted.'
+                : 'Profile updated.',
+        );
     }
 
     /**

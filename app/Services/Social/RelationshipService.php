@@ -116,13 +116,16 @@ class RelationshipService
     public function profile(User $viewer, User $target): array
     {
         $relationship = $this->relationship($viewer, $target);
-        $visible = $relationship['is_self'] || $relationship['following'] === Follow::STATUS_ACCEPTED;
+        $isFollower = $relationship['is_self']
+            || $relationship['following'] === Follow::STATUS_ACCEPTED;
+
+        $visible = $this->canSee($viewer, $target, $relationship['following']);
 
         $profile = [
             'id' => $target->uuid,
             'name' => $target->name,
             'username' => $target->username,
-            'avatar_url' => $this->avatarFor($viewer, $target, $visible),
+            'avatar_url' => $this->avatarFor($viewer, $target, $isFollower),
             'user_type' => $target->user_type,
             'is_verified' => $target->phone_verified_at !== null,
 
@@ -151,16 +154,84 @@ class RelationshipService
         return $profile;
     }
 
+
+    /**
+     * Whether a viewer gets the full profile.
+     *
+     * Public accounts are open to anyone signed in. Private ones open only to
+     * accepted followers — and to the owner, who should never be locked out of
+     * their own profile by their own setting.
+     */
+    private function canSee(User $viewer, User $target, string $followState): bool
+    {
+        return $viewer->id === $target->id
+            || $followState === Follow::STATUS_ACCEPTED
+            || ! $target->is_private;
+    }
+
+    /**
+     * Switching from private to public clears the queue.
+     *
+     * Somebody who opens their account is saying "anyone may follow me", and
+     * leaving old requests pending would contradict that — they would sit
+     * unanswered while new followers walked straight in. Instagram does the
+     * same thing, and users expect it.
+     *
+     * Returns how many were accepted, so the caller can say so.
+     */
+    public function acceptAllPendingFollows(User $user): int
+    {
+        return DB::transaction(function () use ($user): int {
+            $pending = Follow::where('followee_id', $user->id)
+                ->pending()
+                ->with('follower')
+                ->get();
+
+            if ($pending->isEmpty()) {
+                return 0;
+            }
+
+            Follow::whereIn('id', $pending->pluck('id'))->update([
+                'status' => Follow::STATUS_ACCEPTED,
+                'responded_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            foreach ($pending as $follow) {
+                if ($follow->follower === null) {
+                    continue;
+                }
+
+                $this->notifications->push(
+                    to: $follow->follower,
+                    actor: $user,
+                    type: UserNotification::FOLLOW_ACCEPTED,
+                    subject: $follow,
+                    data: ['message' => $user->name.' accepted your follow request.'],
+                );
+
+                $this->notifications->resolveSubject($follow, $user);
+            }
+
+            return $pending->count();
+        });
+    }
+
     /**
      * Which picture a viewer gets.
      *
      * The alternate avatar exists precisely for this moment: a user who has set
      * one is saying "strangers see this instead". Honouring it here is the
      * whole point of having built it.
+     *
+     * Keyed on being an accepted follower, not on the profile being visible.
+     * A public account is readable by anyone, but somebody who set a security
+     * photo still meant it for everyone outside their circle — opening your
+     * profile is not the same as withdrawing that.
      */
-    private function avatarFor(User $viewer, User $target, bool $visible): ?string
+    private function avatarFor(User $viewer, User $target, bool $isFollower): ?string
     {
-        if ($visible) {
+        if ($isFollower) {
             return $target->avatar_url;
         }
 
@@ -313,13 +384,14 @@ class RelationshipService
             $in = $incoming->get($user->id);
             $fam = $family->get($user->id);
 
-            $visible = $viewer->id === $user->id || $out?->isAccepted() === true;
+            $isFollower = $viewer->id === $user->id || $out?->isAccepted() === true;
+            $visible = $this->canSee($viewer, $user, $this->edgeState($out));
 
             return [
                 'id' => $user->uuid,
                 'name' => $user->name,
                 'username' => $user->username,
-                'avatar_url' => $this->avatarFor($viewer, $user, $visible),
+                'avatar_url' => $this->avatarFor($viewer, $user, $isFollower),
                 'user_type' => $user->user_type,
                 'relationship' => [
                     'is_self' => $viewer->id === $user->id,
@@ -375,19 +447,31 @@ class RelationshipService
                 $follow->followee_id = $target->id;
             }
 
-            // Covers a previously declined row being asked again — allowed,
-            // just not silently pre-approved.
-            $follow->status = Follow::STATUS_PENDING;
+            // A public account is followed outright; a private one gets a
+            // request to answer. This also covers a previously declined row
+            // being asked again — allowed, and on a public account it now
+            // simply succeeds, because the owner has since opened up.
+            $instant = ! $target->is_private;
+
+            $follow->status = $instant
+                ? Follow::STATUS_ACCEPTED
+                : Follow::STATUS_PENDING;
             $follow->requested_at = now();
-            $follow->responded_at = null;
+            $follow->responded_at = $instant ? now() : null;
             $follow->save();
 
             $this->notifications->push(
                 to: $target,
                 actor: $actor,
-                type: UserNotification::FOLLOW_REQUESTED,
+                type: $instant
+                    ? UserNotification::FOLLOW_STARTED
+                    : UserNotification::FOLLOW_REQUESTED,
                 subject: $follow,
-                data: ['message' => $actor->name.' wants to follow you.'],
+                data: [
+                    'message' => $instant
+                        ? $actor->name.' started following you.'
+                        : $actor->name.' wants to follow you.',
+                ],
             );
 
             return $follow;
