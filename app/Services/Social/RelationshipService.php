@@ -739,17 +739,28 @@ class RelationshipService
             ->with(['owner', 'member'])
             ->get();
 
-        $members = $rows->map(function (FamilyMember $row) use ($user) {
-            $other = $row->counterpartFor($user);
+        // Build the same per-person shape every other list uses, so the
+        // family tab can render the identical row widget — including its
+        // follow button — instead of needing a parallel one.
+        $others = new Collection(
+            $rows->map(fn (FamilyMember $row) => $row->counterpartFor($user))->all()
+        );
 
-            return [
+        $summaries = collect($this->summaries($user, $others))->keyBy('id');
+
+        $members = $rows->map(function (FamilyMember $row) use ($user, $summaries) {
+            $other = $row->counterpartFor($user);
+            $summary = $summaries->get($other->uuid, []);
+
+            return $summary + [
                 'family_id' => $row->uuid,
                 'id' => $other->uuid,
                 'name' => $other->name,
                 'username' => $other->username,
                 'avatar_url' => $other->avatar_url,
-                'relation' => $row->relationFor($user),
                 'user_type' => $other->user_type,
+            ] + [
+                'relation' => $row->relationFor($user),
 
                 // Placeholder until check-in visibility across a circle lands.
                 // Deliberately not invented: the home strip shows a neutral
