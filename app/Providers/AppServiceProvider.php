@@ -2,6 +2,9 @@
 
 namespace App\Providers;
 
+use App\Services\Otp\Channels\LogOtpSender;
+use App\Services\Otp\Channels\Msg91OtpSender;
+use App\Services\Otp\Contracts\OtpSender;
 use Illuminate\Auth\Middleware\Authenticate;
 use Illuminate\Auth\Middleware\RedirectIfAuthenticated;
 use Illuminate\Http\Request;
@@ -14,7 +17,12 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        // Which channel delivers an OTP is a config choice, so swapping
+        // providers never touches the service or the controllers.
+        $this->app->bind(OtpSender::class, fn () => match (config('otp.driver')) {
+            'msg91' => new Msg91OtpSender,
+            default => new LogOtpSender,
+        });
     }
 
     /**
