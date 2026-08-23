@@ -55,6 +55,23 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
         Route::post('auth/logout', [V1Controller::class, 'logout'])->name('auth.logout');
         Route::get('me', [V1Controller::class, 'me'])->name('me');
 
+
+        /*
+         | Safety. The status endpoint is polled on every home-screen open, so
+         | it gets the standard limit; check-in is a deliberate human action
+         | and is capped far lower.
+         */
+        Route::prefix('safety')->name('safety.')->group(function () {
+            Route::get('status', [V1Controller::class, 'safetyStatus'])->name('status');
+
+            Route::post('check-in', [V1Controller::class, 'checkIn'])
+                ->middleware('throttle:20,1')
+                ->name('check-in');
+
+            Route::get('check-ins', [V1Controller::class, 'checkInHistory'])
+                ->name('check-ins');
+        });
+
         /*
          | Profile. The username check runs on every keystroke (debounced), so
          | it gets a looser throttle than the mutations beside it.

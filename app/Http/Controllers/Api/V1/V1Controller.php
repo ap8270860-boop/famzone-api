@@ -8,6 +8,7 @@ use App\Http\Requests\Api\V1\Auth\RegisterRequest;
 use App\Http\Requests\Api\V1\Auth\SendOtpRequest;
 use App\Http\Requests\Api\V1\Auth\VerifyOtpRequest;
 use App\Http\Requests\Api\V1\Profile\UpdateAvatarRequest;
+use App\Http\Requests\Api\V1\Safety\CheckInRequest;
 use App\Http\Requests\Api\V1\Profile\UpdatePasswordRequest;
 use App\Http\Requests\Api\V1\Profile\UpdateProfileRequest;
 use App\Http\Resources\Api\V1\UserResource;
@@ -16,6 +17,7 @@ use App\Models\User;
 use App\Services\Otp\Exceptions\OtpException;
 use App\Services\Otp\OtpService;
 use App\Services\Profile\UsernameChecker;
+use App\Services\Safety\SafetyService;
 use App\Support\ApiResponse;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -41,6 +43,7 @@ class V1Controller extends Controller
     public function __construct(
         private readonly OtpService $otp,
         private readonly UsernameChecker $usernames,
+        private readonly SafetyService $safety,
     ) {
     }
 
@@ -447,6 +450,65 @@ class V1Controller extends Controller
         }
 
         return $this->ok(new UserResource($user->fresh()), 'Photo removed.');
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Safety
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * GET /api/v1/safety/status
+     *
+     * The whole home-screen safety picture in one payload: the status card,
+     * the check-in card, the streak and the last seven days. One request
+     * rather than three, because they are one fact and must not disagree.
+     */
+    public function safetyStatus(Request $request): JsonResponse
+    {
+        return $this->ok($this->safety->status($request->user()), 'OK');
+    }
+
+    /**
+     * POST /api/v1/safety/check-in
+     *
+     * Idempotent for the user's local day. A second tap returns 200 with the
+     * existing check-in rather than an error — a duplicate request, whether
+     * from an impatient finger or a retry after a dropped response, is not a
+     * failure the user should be shown.
+     *
+     * Returns the same payload as safetyStatus so the client replaces both
+     * cards from this one response instead of re-fetching.
+     */
+    public function checkIn(CheckInRequest $request): JsonResponse
+    {
+        $result = $this->safety->checkIn(
+            $request->user(),
+            $request->checkInData(),
+            $request,
+        );
+
+        return $this->ok(
+            $result['status'],
+            $result['created']
+                ? "You're marked safe for today."
+                : "You've already checked in today.",
+        );
+    }
+
+    /**
+     * GET /api/v1/safety/check-ins?days=30
+     *
+     * History for the streak view. Capped at a year so a bad client cannot
+     * ask for everything.
+     */
+    public function checkInHistory(Request $request): JsonResponse
+    {
+        $days = (int) $request->integer('days', 30);
+        $days = max(1, min(365, $days));
+
+        return $this->ok($this->safety->history($request->user(), $days), 'OK');
     }
 
     /*

@@ -116,6 +116,9 @@ class User extends Authenticatable
             'phone_verified_at' => 'datetime',
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'last_check_in_at' => 'datetime',
+            'check_in_streak' => 'integer',
+            'longest_check_in_streak' => 'integer',
             'sos_pin' => 'hashed',
 
             'date_of_birth' => 'date',
@@ -189,6 +192,15 @@ class User extends Authenticatable
     public function referrals(): HasMany
     {
         return $this->hasMany(self::class, 'referred_by');
+    }
+
+
+    /**
+     * @return HasMany<SafetyCheckIn, User>
+     */
+    public function checkIns(): HasMany
+    {
+        return $this->hasMany(SafetyCheckIn::class);
     }
 
     /*
