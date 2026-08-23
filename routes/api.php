@@ -57,6 +57,58 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
 
 
         /*
+         | People, following and family.
+         |
+         | Every relationship endpoint answers with the full profile of the
+         | other person, including both directions of the relationship, so one
+         | response is enough for the client to repaint whatever screen the
+         | action was taken from.
+         */
+        Route::get('users/search', [V1Controller::class, 'searchUsers'])
+            ->middleware('throttle:60,1')
+            ->name('users.search');
+
+        Route::prefix('users/{uuid}')->name('users.')->group(function () {
+            Route::get('/', [V1Controller::class, 'showUser'])->name('show');
+            Route::get('followers', [V1Controller::class, 'userFollowers'])->name('followers');
+            Route::get('following', [V1Controller::class, 'userFollowing'])->name('following');
+
+            Route::post('follow', [V1Controller::class, 'followUser'])
+                ->middleware('throttle:60,1')
+                ->name('follow');
+            Route::delete('follow', [V1Controller::class, 'unfollowUser'])->name('unfollow');
+            Route::delete('follower', [V1Controller::class, 'removeFollower'])->name('follower.remove');
+
+            Route::post('family', [V1Controller::class, 'inviteToFamily'])
+                ->middleware('throttle:30,1')
+                ->name('family.invite');
+        });
+
+        Route::get('follow-requests', [V1Controller::class, 'followRequests'])
+            ->name('follow-requests.index');
+        Route::post('follow-requests/{uuid}/respond', [V1Controller::class, 'respondToFollowRequest'])
+            ->name('follow-requests.respond');
+
+        Route::get('family', [V1Controller::class, 'family'])->name('family.index');
+        Route::delete('family/{uuid}', [V1Controller::class, 'removeFamilyMember'])
+            ->name('family.remove');
+        Route::post('family-invites/{uuid}/respond', [V1Controller::class, 'respondToFamilyInvite'])
+            ->name('family-invites.respond');
+
+        /*
+         | Notifications. unread-count is polled on every screen open, so it is
+         | deliberately the cheapest endpoint here.
+         */
+        Route::prefix('notifications')->name('notifications.')->group(function () {
+            Route::get('/', [V1Controller::class, 'notifications'])->name('index');
+            Route::get('unread-count', [V1Controller::class, 'unreadNotificationCount'])
+                ->middleware('throttle:120,1')
+                ->name('unread');
+            Route::post('read-all', [V1Controller::class, 'readAllNotifications'])->name('read-all');
+            Route::post('{uuid}/read', [V1Controller::class, 'readNotification'])->name('read');
+        });
+
+        /*
          | Safety. The status endpoint is polled on every home-screen open, so
          | it gets the standard limit; check-in is a deliberate human action
          | and is capped far lower.

@@ -203,6 +203,57 @@ class User extends Authenticatable
         return $this->hasMany(SafetyCheckIn::class);
     }
 
+
+    /**
+     * People this user has asked to follow.
+     *
+     * @return HasMany<Follow, User>
+     */
+    public function following(): HasMany
+    {
+        return $this->hasMany(Follow::class, 'follower_id');
+    }
+
+    /**
+     * People who have asked to follow this user.
+     *
+     * @return HasMany<Follow, User>
+     */
+    public function followers(): HasMany
+    {
+        return $this->hasMany(Follow::class, 'followee_id');
+    }
+
+    /**
+     * Family invites this user has sent.
+     *
+     * Family links touch this user from either end, so listing a full family
+     * means querying FamilyMember::involving() rather than either relation
+     * alone — see RelationshipService::family().
+     *
+     * @return HasMany<FamilyMember, User>
+     */
+    public function familyInvitesSent(): HasMany
+    {
+        return $this->hasMany(FamilyMember::class, 'owner_id');
+    }
+
+    /**
+     * @return HasMany<FamilyMember, User>
+     */
+    public function familyInvitesReceived(): HasMany
+    {
+        return $this->hasMany(FamilyMember::class, 'member_id');
+    }
+
+    /**
+     * @return HasMany<UserNotification, User>
+     */
+    public function notificationFeed(): HasMany
+    {
+        return $this->hasMany(UserNotification::class);
+    }
+
     /*
     |--------------------------------------------------------------------------
     | Accessors

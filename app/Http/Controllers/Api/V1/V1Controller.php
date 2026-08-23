@@ -9,6 +9,8 @@ use App\Http\Requests\Api\V1\Auth\SendOtpRequest;
 use App\Http\Requests\Api\V1\Auth\VerifyOtpRequest;
 use App\Http\Requests\Api\V1\Profile\UpdateAvatarRequest;
 use App\Http\Requests\Api\V1\Safety\CheckInRequest;
+use App\Http\Requests\Api\V1\Social\FamilyInviteRequest;
+use App\Http\Requests\Api\V1\Social\RespondRequest;
 use App\Http\Requests\Api\V1\Profile\UpdatePasswordRequest;
 use App\Http\Requests\Api\V1\Profile\UpdateProfileRequest;
 use App\Http\Resources\Api\V1\UserResource;
@@ -18,6 +20,8 @@ use App\Services\Otp\Exceptions\OtpException;
 use App\Services\Otp\OtpService;
 use App\Services\Profile\UsernameChecker;
 use App\Services\Safety\SafetyService;
+use App\Services\Social\NotificationService;
+use App\Services\Social\RelationshipService;
 use App\Support\ApiResponse;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -44,6 +48,8 @@ class V1Controller extends Controller
         private readonly OtpService $otp,
         private readonly UsernameChecker $usernames,
         private readonly SafetyService $safety,
+        private readonly RelationshipService $relationships,
+        private readonly NotificationService $notifier,
     ) {
     }
 
@@ -509,6 +515,290 @@ class V1Controller extends Controller
         $days = max(1, min(365, $days));
 
         return $this->ok($this->safety->history($request->user(), $days), 'OK');
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | People
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * GET /api/v1/users/search?q=...
+     *
+     * Live search, called on each keystroke after a client-side debounce, so
+     * it gets a loose throttle. Name and username match on a prefix; a phone
+     * number matches only in full — see RelationshipService::search for why.
+     *
+     * Every result carries its relationship state, so the list can render the
+     * right button without a second round trip per row.
+     */
+    public function searchUsers(Request $request): JsonResponse
+    {
+        $term = (string) $request->query('q', '');
+
+        return $this->ok(
+            $this->relationships->search($request->user(), $term),
+            'OK',
+        );
+    }
+
+    /**
+     * GET /api/v1/users/{uuid}
+     *
+     * A profile as the caller is allowed to see it. Somebody who is not an
+     * accepted follower gets name, username, avatar and counts only, plus the
+     * alternate avatar if that person set one.
+     */
+    public function showUser(Request $request, string $uuid): JsonResponse
+    {
+        return $this->ok(
+            $this->relationships->profile($request->user(), $this->findUser($uuid)),
+            'OK',
+        );
+    }
+
+    /**
+     * POST /api/v1/users/{uuid}/follow
+     */
+    public function followUser(Request $request, string $uuid): JsonResponse
+    {
+        $target = $this->findUser($uuid);
+        $follow = $this->relationships->follow($request->user(), $target);
+
+        return $this->ok(
+            $this->relationships->profile($request->user()->fresh(), $target->fresh()),
+            $follow->isAccepted() ? 'You are following them.' : 'Request sent.',
+        );
+    }
+
+    /**
+     * DELETE /api/v1/users/{uuid}/follow
+     *
+     * Unfollow, or withdraw a request that has not been answered.
+     */
+    public function unfollowUser(Request $request, string $uuid): JsonResponse
+    {
+        $target = $this->findUser($uuid);
+        $this->relationships->unfollow($request->user(), $target);
+
+        return $this->ok(
+            $this->relationships->profile($request->user()->fresh(), $target->fresh()),
+            'Removed.',
+        );
+    }
+
+    /**
+     * DELETE /api/v1/users/{uuid}/follower
+     *
+     * Remove somebody who follows me.
+     */
+    public function removeFollower(Request $request, string $uuid): JsonResponse
+    {
+        $target = $this->findUser($uuid);
+        $this->relationships->removeFollower($request->user(), $target);
+
+        return $this->ok(
+            $this->relationships->profile($request->user()->fresh(), $target->fresh()),
+            'Follower removed.',
+        );
+    }
+
+    /**
+     * POST /api/v1/follow-requests/{uuid}/respond   { "accept": true }
+     */
+    public function respondToFollowRequest(RespondRequest $request, string $uuid): JsonResponse
+    {
+        $follow = $this->relationships->respondToFollow(
+            $request->user(),
+            $uuid,
+            $request->accepts(),
+        );
+
+        return $this->ok(
+            $this->relationships->profile($request->user()->fresh(), $follow->follower),
+            $request->accepts() ? 'Request accepted.' : 'Request declined.',
+        );
+    }
+
+    /**
+     * GET /api/v1/users/{uuid}/followers
+     */
+    public function userFollowers(Request $request, string $uuid): JsonResponse
+    {
+        return $this->ok(
+            $this->relationships->followers($request->user(), $this->findUser($uuid)),
+            'OK',
+        );
+    }
+
+    /**
+     * GET /api/v1/users/{uuid}/following
+     */
+    public function userFollowing(Request $request, string $uuid): JsonResponse
+    {
+        return $this->ok(
+            $this->relationships->following($request->user(), $this->findUser($uuid)),
+            'OK',
+        );
+    }
+
+    /**
+     * GET /api/v1/follow-requests
+     */
+    public function followRequests(Request $request): JsonResponse
+    {
+        return $this->ok(
+            $this->relationships->pendingFollowRequests($request->user()),
+            'OK',
+        );
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Family
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * GET /api/v1/family
+     *
+     * Everyone in the caller's circle, from both ends of the table. Drives the
+     * home screen's family strip.
+     */
+    public function family(Request $request): JsonResponse
+    {
+        return $this->ok($this->relationships->family($request->user()), 'OK');
+    }
+
+    /**
+     * POST /api/v1/users/{uuid}/family   { "relation": "mother" }
+     *
+     * Only works once they have accepted your follow. Family membership is
+     * what will later carry location and SOS visibility, so it needs its own
+     * consent rather than riding along on a follow.
+     */
+    public function inviteToFamily(FamilyInviteRequest $request, string $uuid): JsonResponse
+    {
+        $target = $this->findUser($uuid);
+
+        $this->relationships->inviteToFamily(
+            $request->user(),
+            $target,
+            $request->relation(),
+        );
+
+        return $this->ok(
+            $this->relationships->profile($request->user()->fresh(), $target->fresh()),
+            'Invite sent.',
+        );
+    }
+
+    /**
+     * POST /api/v1/family-invites/{uuid}/respond   { "accept": true }
+     */
+    public function respondToFamilyInvite(RespondRequest $request, string $uuid): JsonResponse
+    {
+        $family = $this->relationships->respondToFamily(
+            $request->user(),
+            $uuid,
+            $request->accepts(),
+            $request->input('relation'),
+        );
+
+        return $this->ok(
+            $this->relationships->profile($request->user()->fresh(), $family->owner),
+            $request->accepts() ? 'Added to your family.' : 'Invite declined.',
+        );
+    }
+
+    /**
+     * DELETE /api/v1/family/{uuid}
+     *
+     * Either side may end a family link.
+     */
+    public function removeFamilyMember(Request $request, string $uuid): JsonResponse
+    {
+        $this->relationships->removeFamily($request->user(), $uuid);
+
+        return $this->ok($this->relationships->family($request->user()), 'Removed.');
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Notifications
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * GET /api/v1/notifications?page=1
+     *
+     * Each entry's action state is resolved from the request it points at, not
+     * stored — so a request accepted from a profile screen never leaves a
+     * stale Accept button here.
+     */
+    public function notifications(Request $request): JsonResponse
+    {
+        return $this->ok(
+            $this->notifier->feed(
+                $request->user(),
+                max(1, (int) $request->integer('page', 1)),
+                (int) $request->integer('per_page', 30),
+            ),
+            'OK',
+        );
+    }
+
+    /**
+     * GET /api/v1/notifications/unread-count
+     *
+     * Polled far more often than the feed is opened, so it stays a single
+     * indexed count rather than loading rows.
+     */
+    public function unreadNotificationCount(Request $request): JsonResponse
+    {
+        return $this->ok(
+            ['unread' => $this->notifier->unreadCount($request->user())],
+            'OK',
+        );
+    }
+
+    /**
+     * POST /api/v1/notifications/{uuid}/read
+     */
+    public function readNotification(Request $request, string $uuid): JsonResponse
+    {
+        $this->notifier->markRead($request->user(), $uuid);
+
+        return $this->ok(
+            ['unread' => $this->notifier->unreadCount($request->user())],
+            'OK',
+        );
+    }
+
+    /**
+     * POST /api/v1/notifications/read-all
+     */
+    public function readAllNotifications(Request $request): JsonResponse
+    {
+        $this->notifier->markAllRead($request->user());
+
+        return $this->ok(['unread' => 0], 'All caught up.');
+    }
+
+    /**
+     * Resolve a public user id, or 404.
+     *
+     * Only ever accepts a uuid — the auto-increment key is not addressable
+     * from outside, so user ids stay unguessable.
+     */
+    private function findUser(string $uuid): User
+    {
+        $user = User::where('uuid', $uuid)->first();
+
+        abort_if($user === null, 404, 'That account does not exist.');
+
+        return $user;
     }
 
     /*
