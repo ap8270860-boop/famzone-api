@@ -38,6 +38,8 @@ use Illuminate\Support\Str;
     'email',
     'password',
     'avatar_path',
+    'alternate_avatar_path',
+    'use_alternate_avatar',
     'date_of_birth',
     'user_type',
     'education_stage',
@@ -116,6 +118,7 @@ class User extends Authenticatable
             'show_read_receipts' => 'boolean',
             'allow_group_invites' => 'boolean',
 
+            'use_alternate_avatar' => 'boolean',
             'is_sharing_location' => 'boolean',
             'last_latitude' => 'decimal:7',
             'last_longitude' => 'decimal:7',
@@ -193,15 +196,44 @@ class User extends Authenticatable
         );
     }
 
-    /** Temporary signed URL for the avatar, or null when none is set. */
+    /** Public URL for the avatar, or null when none is set. */
     protected function avatarUrl(): Attribute
     {
+        return Attribute::get(fn (): ?string => $this->urlFor($this->avatar_path));
+    }
+
+    /** Public URL for the decoy avatar shown outside the user's circles. */
+    protected function alternateAvatarUrl(): Attribute
+    {
         return Attribute::get(
-            fn (): ?string => $this->avatar_path === null
-                ? null
-                : Storage::disk(config('filesystems.default'))
-                    ->temporaryUrl($this->avatar_path, now()->addHour()),
+            fn (): ?string => $this->urlFor($this->alternate_avatar_path),
         );
+    }
+
+    /**
+     * Build a URL for a stored object.
+     *
+     * S3 gets a short-lived signed URL so avatars are not world-readable;
+     * the local and public disks have no signing, so they get a plain URL.
+     * Calling temporaryUrl() on a disk that cannot sign throws, which is why
+     * this branches rather than always signing.
+     */
+    protected function urlFor(?string $path): ?string
+    {
+        if ($path === null) {
+            return null;
+        }
+
+        $disk = Storage::disk(config('filesystems.default'));
+
+        try {
+            return $disk->providesTemporaryUrls()
+                ? $disk->temporaryUrl($path, now()->addHour())
+                : $disk->url($path);
+        } catch (\Throwable) {
+            // A missing or misconfigured disk must not break a profile read.
+            return null;
+        }
     }
 
     /*

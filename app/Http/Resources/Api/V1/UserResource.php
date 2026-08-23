@@ -29,6 +29,8 @@ class UserResource extends JsonResource
             'email_verified' => $this->email_verified_at !== null,
 
             'avatar_url' => $this->avatar_url,
+            'alternate_avatar_url' => $this->alternate_avatar_url,
+            'use_alternate_avatar' => $this->use_alternate_avatar,
             'about' => $this->about,
             'date_of_birth' => $this->date_of_birth?->toDateString(),
             'gender' => $this->gender,
@@ -46,6 +48,7 @@ class UserResource extends JsonResource
                 'show_online_status' => $this->show_online_status,
                 'show_read_receipts' => $this->show_read_receipts,
                 'allow_group_invites' => $this->allow_group_invites,
+                'emergency_message' => $this->emergency_message,
             ],
 
             'subscription' => [
@@ -56,6 +59,7 @@ class UserResource extends JsonResource
                 'ai_messages_limit' => User::AI_FREE_MESSAGE_LIMIT,
             ],
 
+            'has_password' => filled($this->password),
             'referral_code' => $this->referral_code,
             'onboarding_completed' => $this->onboarding_completed_at !== null,
             'created_at' => $this->created_at?->toIso8601String(),
