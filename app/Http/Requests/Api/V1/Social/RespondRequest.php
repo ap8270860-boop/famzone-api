@@ -46,7 +46,15 @@ class RespondRequest extends FormRequest
         ];
     }
 
-    public function accepts(): bool
+    /**
+     * Whether the user accepted.
+     *
+     * Named wasAccepted() rather than accepts(), because Illuminate\Http\Request
+     * already defines accepts($contentTypes) for content negotiation — an
+     * override with a different signature is a fatal error the moment the
+     * class is loaded.
+     */
+    public function wasAccepted(): bool
     {
         return $this->boolean('accept');
     }

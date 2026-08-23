@@ -629,12 +629,12 @@ class V1Controller extends Controller
         $follow = $this->relationships->respondToFollow(
             $request->user(),
             $uuid,
-            $request->accepts(),
+            $request->wasAccepted(),
         );
 
         return $this->ok(
             $this->relationships->profile($request->user()->fresh(), $follow->follower),
-            $request->accepts() ? 'Request accepted.' : 'Request declined.',
+            $request->wasAccepted() ? 'Request accepted.' : 'Request declined.',
         );
     }
 
@@ -719,13 +719,13 @@ class V1Controller extends Controller
         $family = $this->relationships->respondToFamily(
             $request->user(),
             $uuid,
-            $request->accepts(),
+            $request->wasAccepted(),
             $request->input('relation'),
         );
 
         return $this->ok(
             $this->relationships->profile($request->user()->fresh(), $family->owner),
-            $request->accepts() ? 'Added to your family.' : 'Invite declined.',
+            $request->wasAccepted() ? 'Added to your family.' : 'Invite declined.',
         );
     }
 
