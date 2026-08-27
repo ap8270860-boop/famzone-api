@@ -9,6 +9,7 @@ use App\Http\Requests\Api\V1\Auth\SendOtpRequest;
 use App\Http\Requests\Api\V1\Auth\VerifyOtpRequest;
 use App\Http\Requests\Api\V1\Profile\UpdateAvatarRequest;
 use App\Http\Requests\Api\V1\Safety\CheckInRequest;
+use App\Http\Requests\Api\V1\Social\BlockRequest;
 use App\Http\Requests\Api\V1\Social\FamilyInviteRequest;
 use App\Http\Requests\Api\V1\Social\RespondRequest;
 use App\Http\Requests\Api\V1\Profile\UpdatePasswordRequest;
@@ -20,6 +21,7 @@ use App\Services\Otp\Exceptions\OtpException;
 use App\Services\Otp\OtpService;
 use App\Services\Profile\UsernameChecker;
 use App\Services\Safety\SafetyService;
+use App\Services\Social\BlockService;
 use App\Services\Social\NotificationService;
 use App\Services\Social\RelationshipService;
 use App\Support\ApiResponse;
@@ -50,6 +52,7 @@ class V1Controller extends Controller
         private readonly SafetyService $safety,
         private readonly RelationshipService $relationships,
         private readonly NotificationService $notifier,
+        private readonly BlockService $blocks,
     ) {
     }
 
@@ -739,6 +742,62 @@ class V1Controller extends Controller
         $this->relationships->removeFamily($request->user(), $uuid);
 
         return $this->ok($this->relationships->family($request->user()), 'Removed.');
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Blocking
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * POST /api/v1/users/{uuid}/block
+     *
+     * Severs follows both ways, ends any family link, and clears the
+     * notifications each holds about the other — then records the block.
+     * All of it in one transaction, because half a block is worse than none.
+     *
+     * The blocked person is never told.
+     */
+    public function blockUser(BlockRequest $request, string $uuid): JsonResponse
+    {
+        $target = $this->findUser($uuid);
+
+        $this->blocks->block($request->user(), $target, $request->reason());
+
+        return $this->ok(
+            $this->relationships->profile($request->user()->fresh(), $target->fresh()),
+            $target->name.' has been blocked.',
+        );
+    }
+
+    /**
+     * DELETE /api/v1/users/{uuid}/block
+     *
+     * Lifts the block. Does not restore the follows or family link it removed
+     * — those have to be asked for again.
+     */
+    public function unblockUser(Request $request, string $uuid): JsonResponse
+    {
+        $target = $this->findUser($uuid);
+
+        $this->blocks->unblock($request->user(), $target);
+
+        return $this->ok(
+            $this->relationships->profile($request->user()->fresh(), $target->fresh()),
+            $target->name.' has been unblocked.',
+        );
+    }
+
+    /**
+     * GET /api/v1/blocks
+     *
+     * The only way back: a blocked account is hidden from search, so without
+     * this list a block would be permanent by accident.
+     */
+    public function blockedAccounts(Request $request): JsonResponse
+    {
+        return $this->ok($this->blocks->blockedList($request->user()), 'OK');
     }
 
     /*

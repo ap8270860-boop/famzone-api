@@ -2,6 +2,7 @@
 
 namespace App\Services\Social;
 
+use App\Models\Block;
 use App\Models\FamilyMember;
 use App\Models\Follow;
 use App\Models\User;
@@ -30,8 +31,26 @@ class RelationshipService
 
     public function __construct(
         private readonly NotificationService $notifications,
+        private readonly BlockService $blocks,
     ) {
     }
+    /**
+     * Whether a wall stands between the viewer and this person.
+     *
+     * Cached per request: a single profile read asks this several times over,
+     * and it is the same answer every time.
+     *
+     * @var array<string, bool>
+     */
+    private array $wallCache = [];
+
+    private function walled(User $viewer, User $target): bool
+    {
+        $key = $viewer->id.':'.$target->id;
+
+        return $this->wallCache[$key] ??= $this->blocks->wallExists($viewer->id, $target->id);
+    }
+
 
     /*
     |--------------------------------------------------------------------------
@@ -69,6 +88,10 @@ class RelationshipService
             ->where('id', '!=', $viewer->id)
             ->whereNull('deleted_at')
             ->where('status', User::STATUS_ACTIVE)
+            // Blocked in either direction: gone from results. A
+            // subquery rather than a fetched id list, because this
+            // runs on every keystroke.
+            ->whereNotIn('id', Block::wallIds($viewer->id))
             ->where(function (Builder $q) use ($term, $digits, $looksLikePhone) {
                 $prefix = $this->escapeLike($term).'%';
 
@@ -115,11 +138,24 @@ class RelationshipService
      */
     public function profile(User $viewer, User $target): array
     {
+        // Somebody who blocked you should not be findable, readable
+        // or provably present. 404 is what Instagram shows and it is
+        // the least disclosing honest answer — anything softer tells
+        // the blocked person they were blocked.
+        //
+        // The blocker still gets the profile, because that is where
+        // the Unblock button lives.
+        if ($viewer->id !== $target->id
+            && $this->blocks->hasBlocked($target->id, $viewer->id)) {
+            abort(404, 'That account is not available.');
+        }
+
         $relationship = $this->relationship($viewer, $target);
         $isFollower = $relationship['is_self']
             || $relationship['following'] === Follow::STATUS_ACCEPTED;
 
-        $visible = $this->canSee($viewer, $target, $relationship['following']);
+        $visible = ! $relationship['blocked_by_me']
+            && $this->canSee($viewer, $target, $relationship['following']);
 
         $profile = [
             'id' => $target->uuid,
@@ -263,6 +299,14 @@ class RelationshipService
             return $this->selfRelationship();
         }
 
+        $blockedByMe = $this->blocks->hasBlocked($viewer->id, $target->id);
+
+        // Nothing survives a block, so there is no point querying
+        // edges that severEverything() already removed.
+        if ($blockedByMe) {
+            return $this->blockedRelationship();
+        }
+
         $outgoing = Follow::between($viewer->id, $target->id)->first();
         $incoming = Follow::between($target->id, $viewer->id)->first();
 
@@ -276,6 +320,8 @@ class RelationshipService
 
         return [
             'is_self' => false,
+            'blocked_by_me' => false,
+            'can_follow' => true,
 
             // Me -> them. "none" when there is no edge, or when a previous
             // request was declined: a declined row is kept to stop resend
@@ -302,12 +348,37 @@ class RelationshipService
     }
 
     /**
+     * Everything a block collapses to. No edges, no family, no
+     * actions except lifting it.
+     *
+     * @return array<string, mixed>
+     */
+    private function blockedRelationship(): array
+    {
+        return [
+            'is_self' => false,
+            'blocked_by_me' => true,
+            'can_follow' => false,
+            'following' => 'none',
+            'followed_by' => 'none',
+            'incoming_request_id' => null,
+            'outgoing_request_id' => null,
+            'family' => 'none',
+            'family_id' => null,
+            'family_relation' => null,
+            'can_invite_to_family' => false,
+        ];
+    }
+
+    /**
      * @return array<string, mixed>
      */
     private function selfRelationship(): array
     {
         return [
             'is_self' => true,
+            'blocked_by_me' => false,
+            'can_follow' => false,
             'following' => 'none',
             'followed_by' => 'none',
             'incoming_request_id' => null,
@@ -395,6 +466,8 @@ class RelationshipService
                 'user_type' => $user->user_type,
                 'relationship' => [
                     'is_self' => $viewer->id === $user->id,
+                    'blocked_by_me' => false,
+                    'can_follow' => true,
                     'following' => $this->edgeState($out),
                     'followed_by' => $this->edgeState($in),
                     'incoming_request_id' => $in?->isPending() ? $in->uuid : null,
@@ -427,6 +500,13 @@ class RelationshipService
         }
 
         if ($target->isBanned()) {
+            $this->reject('That account is not available.');
+        }
+
+        // Deliberately the same wording either way round. Telling
+        // somebody "you have been blocked" is the one thing a block
+        // must never do.
+        if ($this->walled($actor, $target)) {
             $this->reject('That account is not available.');
         }
 

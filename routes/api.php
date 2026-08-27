@@ -79,6 +79,12 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
             Route::delete('follow', [V1Controller::class, 'unfollowUser'])->name('unfollow');
             Route::delete('follower', [V1Controller::class, 'removeFollower'])->name('follower.remove');
 
+            Route::post('block', [V1Controller::class, 'blockUser'])
+                ->middleware('throttle:30,1')
+                ->name('block');
+            Route::delete('block', [V1Controller::class, 'unblockUser'])
+                ->name('unblock');
+
             Route::post('family', [V1Controller::class, 'inviteToFamily'])
                 ->middleware('throttle:30,1')
                 ->name('family.invite');
@@ -88,6 +94,9 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
             ->name('follow-requests.index');
         Route::post('follow-requests/{uuid}/respond', [V1Controller::class, 'respondToFollowRequest'])
             ->name('follow-requests.respond');
+
+        Route::get('blocks', [V1Controller::class, 'blockedAccounts'])
+            ->name('blocks.index');
 
         Route::get('family', [V1Controller::class, 'family'])->name('family.index');
         Route::delete('family/{uuid}', [V1Controller::class, 'removeFamilyMember'])
