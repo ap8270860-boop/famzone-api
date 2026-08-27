@@ -81,6 +81,8 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
             Route::get('followers', [V1Controller::class, 'userFollowers'])->name('followers');
             Route::get('following', [V1Controller::class, 'userFollowing'])->name('following');
             Route::get('posts', [V1Controller::class, 'userPosts'])->name('posts');
+            Route::get('tagged-posts', [V1Controller::class, 'userTaggedPosts'])
+                ->name('posts.tagged');
 
             Route::post('follow', [V1Controller::class, 'followUser'])
                 ->middleware('throttle:60,1')

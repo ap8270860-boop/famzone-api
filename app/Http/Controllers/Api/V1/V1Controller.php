@@ -936,6 +936,25 @@ class V1Controller extends Controller
     }
 
     /**
+     * GET /api/v1/users/{uuid}/tagged-posts?page=1
+     *
+     * Posts this person has been tagged in, filtered by whether the
+     * caller may see each post's own author.
+     */
+    public function userTaggedPosts(Request $request, string $uuid): JsonResponse
+    {
+        return $this->ok(
+            $this->posts->taggedIn(
+                $request->user(),
+                $this->findUser($uuid),
+                max(1, (int) $request->integer('page', 1)),
+                (int) $request->integer('per_page', 24),
+            ),
+            'OK',
+        );
+    }
+
+    /**
      * GET /api/v1/posts/{uuid}
      */
     public function showPost(Request $request, string $uuid): JsonResponse

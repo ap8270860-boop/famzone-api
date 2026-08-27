@@ -95,6 +95,59 @@ class PostService
         ];
     }
 
+
+    /**
+     * Posts somebody has been tagged in.
+     *
+     * Two visibility rules apply, not one. The viewer must be allowed to see
+     * the tagged person's profile — that is what gets them to this tab — and
+     * then each individual post is filtered by whether they may see its
+     * author. Otherwise tagging would be a hole straight through a private
+     * account: tag a public friend, and your post becomes visible to everyone
+     * who follows them.
+     *
+     * @return array<string, mixed>
+     */
+    public function taggedIn(User $viewer, User $subject, int $page = 1, int $perPage = self::PER_PAGE): array
+    {
+        if (! $this->canView($viewer, $subject)) {
+            return [
+                'can_view' => false,
+                'total' => 0, 'page' => 1, 'per_page' => $perPage,
+                'has_more' => false, 'posts' => [],
+            ];
+        }
+
+        $perPage = max(1, min(50, $perPage));
+
+        $query = Post::query()
+            ->published()
+            ->whereIn('id', DB::table('post_tags')
+                ->where('user_id', $subject->id)
+                ->select('post_id'));
+
+        $total = (clone $query)->count();
+
+        $posts = $query->with(['user', 'taggedUsers'])
+            ->newestFirst()
+            ->forPage($page, $perPage)
+            ->get()
+            // Per-post author check. Done after the page is fetched rather
+            // than as a join, because the rule lives in canView() and
+            // duplicating it in SQL is how the two drift apart.
+            ->filter(fn (Post $post) => $this->canView($viewer, $post->user))
+            ->values();
+
+        return [
+            'can_view' => true,
+            'total' => $total,
+            'page' => $page,
+            'per_page' => $perPage,
+            'has_more' => $page * $perPage < $total,
+            'posts' => $this->present($viewer, new Collection($posts->all())),
+        ];
+    }
+
     /**
      * @return array<string, mixed>|null
      */
