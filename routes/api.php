@@ -33,6 +33,14 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
         ->where('slot', 'primary|alternate')
         ->name('media.avatar');
 
+
+    /*
+     | Signed post images. Same contract as the avatar route above.
+     */
+    Route::get('media/post/{uuid}', [V1Controller::class, 'streamPostImage'])
+        ->middleware('signed')
+        ->name('media.post');
+
     /*
      | Public authentication.
      |
@@ -72,6 +80,7 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
             Route::get('/', [V1Controller::class, 'showUser'])->name('show');
             Route::get('followers', [V1Controller::class, 'userFollowers'])->name('followers');
             Route::get('following', [V1Controller::class, 'userFollowing'])->name('following');
+            Route::get('posts', [V1Controller::class, 'userPosts'])->name('posts');
 
             Route::post('follow', [V1Controller::class, 'followUser'])
                 ->middleware('throttle:60,1')
@@ -89,6 +98,28 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
                 ->middleware('throttle:30,1')
                 ->name('family.invite');
         });
+
+
+        /*
+         | Posts. Creating one uploads an image, so it is capped low; reading
+         | is as cheap as any other list.
+         */
+        Route::post('posts', [V1Controller::class, 'createPost'])
+            ->middleware('throttle:20,1')
+            ->name('posts.store');
+
+        Route::get('posts/{uuid}', [V1Controller::class, 'showPost'])->name('posts.show');
+        Route::delete('posts/{uuid}', [V1Controller::class, 'deletePost'])->name('posts.destroy');
+
+        Route::post('posts/{uuid}/like', [V1Controller::class, 'likePost'])
+            ->middleware('throttle:120,1')
+            ->name('posts.like');
+        Route::delete('posts/{uuid}/like', [V1Controller::class, 'unlikePost'])
+            ->middleware('throttle:120,1')
+            ->name('posts.unlike');
+
+        Route::get('posts/{uuid}/likes', [V1Controller::class, 'postLikes'])
+            ->name('posts.likes');
 
         Route::get('follow-requests', [V1Controller::class, 'followRequests'])
             ->name('follow-requests.index');

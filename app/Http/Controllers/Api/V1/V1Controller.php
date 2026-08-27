@@ -7,6 +7,7 @@ use App\Http\Requests\Api\V1\Auth\LoginRequest;
 use App\Http\Requests\Api\V1\Auth\RegisterRequest;
 use App\Http\Requests\Api\V1\Auth\SendOtpRequest;
 use App\Http\Requests\Api\V1\Auth\VerifyOtpRequest;
+use App\Http\Requests\Api\V1\Posts\CreatePostRequest;
 use App\Http\Requests\Api\V1\Profile\UpdateAvatarRequest;
 use App\Http\Requests\Api\V1\Safety\CheckInRequest;
 use App\Http\Requests\Api\V1\Social\BlockRequest;
@@ -16,9 +17,11 @@ use App\Http\Requests\Api\V1\Profile\UpdatePasswordRequest;
 use App\Http\Requests\Api\V1\Profile\UpdateProfileRequest;
 use App\Http\Resources\Api\V1\UserResource;
 use App\Models\OtpCode;
+use App\Models\Post;
 use App\Models\User;
 use App\Services\Otp\Exceptions\OtpException;
 use App\Services\Otp\OtpService;
+use App\Services\Posts\PostService;
 use App\Services\Profile\UsernameChecker;
 use App\Services\Safety\SafetyService;
 use App\Services\Social\BlockService;
@@ -53,6 +56,7 @@ class V1Controller extends Controller
         private readonly RelationshipService $relationships,
         private readonly NotificationService $notifier,
         private readonly BlockService $blocks,
+        private readonly PostService $posts,
     ) {
     }
 
@@ -875,6 +879,152 @@ class V1Controller extends Controller
         abort_if($user === null, 404, 'That account does not exist.');
 
         return $user;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Posts
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * POST /api/v1/posts   (multipart: image, caption, tagged[])
+     *
+     * Publishes a photo. The client crops to a square before uploading; the
+     * real dimensions are recorded either way so a grid can reserve the right
+     * box before the bytes arrive.
+     *
+     * Tagging is limited to people the author follows or who follow them —
+     * otherwise a post is a way to attach your name to a stranger's photo.
+     */
+    public function createPost(CreatePostRequest $request): JsonResponse
+    {
+        $post = $this->posts->create(
+            $request->user(),
+            $request->file('image'),
+            $request->input('caption'),
+            $request->taggedUuids(),
+        );
+
+        return $this->created(
+            $this->posts->show($request->user(), $post),
+            'Posted.',
+        );
+    }
+
+    /**
+     * GET /api/v1/users/{uuid}/posts?page=1
+     *
+     * One person's grid, newest first.
+     *
+     * Answers `can_view: false` with an empty list rather than a 403 when the
+     * account is private and the caller is not an accepted follower — the
+     * profile screen needs to draw a "private account" panel, and an error
+     * would make that look like a failure instead of a state.
+     */
+    public function userPosts(Request $request, string $uuid): JsonResponse
+    {
+        return $this->ok(
+            $this->posts->forUser(
+                $request->user(),
+                $this->findUser($uuid),
+                max(1, (int) $request->integer('page', 1)),
+                (int) $request->integer('per_page', 24),
+            ),
+            'OK',
+        );
+    }
+
+    /**
+     * GET /api/v1/posts/{uuid}
+     */
+    public function showPost(Request $request, string $uuid): JsonResponse
+    {
+        $payload = $this->posts->show($request->user(), $this->findPost($uuid));
+
+        abort_if($payload === null, 404, 'That post is not available.');
+
+        return $this->ok($payload, 'OK');
+    }
+
+    /**
+     * DELETE /api/v1/posts/{uuid}
+     */
+    public function deletePost(Request $request, string $uuid): JsonResponse
+    {
+        $this->posts->delete($request->user(), $this->findPost($uuid));
+
+        return $this->ok(null, 'Post deleted.');
+    }
+
+    /**
+     * POST /api/v1/posts/{uuid}/like
+     *
+     * Idempotent: liking twice is not an error, because the caller asked for
+     * a state rather than an increment.
+     */
+    public function likePost(Request $request, string $uuid): JsonResponse
+    {
+        return $this->ok(
+            $this->posts->toggleLike($request->user(), $this->findPost($uuid), true),
+            'Liked.',
+        );
+    }
+
+    /**
+     * DELETE /api/v1/posts/{uuid}/like
+     */
+    public function unlikePost(Request $request, string $uuid): JsonResponse
+    {
+        return $this->ok(
+            $this->posts->toggleLike($request->user(), $this->findPost($uuid), false),
+            'Removed.',
+        );
+    }
+
+    /**
+     * GET /api/v1/posts/{uuid}/likes
+     */
+    public function postLikes(Request $request, string $uuid): JsonResponse
+    {
+        return $this->ok(
+            $this->posts->likes($request->user(), $this->findPost($uuid)),
+            'OK',
+        );
+    }
+
+    /**
+     * GET /api/v1/media/post/{uuid}   (signed)
+     *
+     * Streams a post image. Same reasoning as the avatar route: posts live on
+     * a private disk, and the signature in the query string is the credential,
+     * so the link works inside a plain <img> tag.
+     */
+    public function streamPostImage(Request $request, string $uuid): StreamedResponse
+    {
+        $post = Post::where('uuid', $uuid)->first();
+
+        abort_if($post === null, 404);
+
+        $disk = Storage::disk(config('filesystems.default'));
+
+        abort_unless($disk->exists($post->image_path), 404);
+
+        return $disk->response($post->image_path, null, [
+            'Cache-Control' => 'private, max-age=3600',
+        ]);
+    }
+
+    /**
+     * Resolve a post by its public id, or 404.
+     */
+    private function findPost(string $uuid): Post
+    {
+        $post = Post::where('uuid', $uuid)->first();
+
+        abort_if($post === null, 404, 'That post is not available.');
+
+        return $post;
     }
 
     /*
