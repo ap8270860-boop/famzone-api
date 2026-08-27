@@ -66,8 +66,14 @@ class Post extends Model
      */
     public function likers(): BelongsToMany
     {
+        // withPivot, not withTimestamps.
+        //
+        // withTimestamps() writes updated_at as well, and these join tables
+        // deliberately have only created_at: a like or a tag is recorded once
+        // and never edited, so an updated_at column would be dead weight that
+        // is always equal to created_at.
         return $this->belongsToMany(User::class, 'post_likes')
-            ->withTimestamps();
+            ->withPivot('created_at');
     }
 
     /**
@@ -76,7 +82,7 @@ class Post extends Model
     public function taggedUsers(): BelongsToMany
     {
         return $this->belongsToMany(User::class, 'post_tags')
-            ->withTimestamps();
+            ->withPivot('created_at');
     }
 
     /**

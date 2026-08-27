@@ -196,7 +196,13 @@ class PostService
                 $post->save();
 
                 if ($tagged->isNotEmpty()) {
-                    $post->taggedUsers()->attach($tagged->pluck('id')->all());
+                    // The pivot carries created_at itself, so it has to be
+                    // supplied here — the relation no longer fills timestamps.
+                    $post->taggedUsers()->attach(
+                        $tagged->mapWithKeys(
+                            fn (User $user) => [$user->id => ['created_at' => now()]]
+                        )->all()
+                    );
                 }
 
                 return $post->load(['user', 'taggedUsers']);
