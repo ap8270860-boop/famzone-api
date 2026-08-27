@@ -261,6 +261,14 @@ class SafetyService
             'completed' => $rows->count(),
             'rate' => (int) round($rows->count() / $elapsed * 100),
 
+            // Denormalised on the user, so including them here costs nothing
+            // and saves the history screen a second request for numbers it
+            // shows above the fold.
+            'streak' => [
+                'current' => (int) $user->check_in_streak,
+                'longest' => (int) $user->longest_check_in_streak,
+            ],
+
             'check_ins' => $rows->map(fn (SafetyCheckIn $c) => [
                 'id' => $c->uuid,
                 'date' => $c->check_in_date->toDateString(),
