@@ -181,6 +181,8 @@ class PostService
             ->pluck('post_id')
             ->flip();
 
+        $preview = $this->likePreviews($posts->pluck('id')->all());
+
         return $posts->map(fn (Post $post) => [
             'id' => $post->uuid,
             'image_url' => $post->image_url,
@@ -199,12 +201,84 @@ class PostService
                 'avatar_url' => $post->user->avatar_url,
             ],
 
+            // Enough to render "Liked by X and 4 others" without a request
+            // per post. Deliberately capped rather than sending every liker:
+            // a popular post would otherwise put thousands of names into a
+            // grid payload nobody reads.
+            'likes_preview' => ($preview[$post->id] ?? collect())
+                ->map(fn (User $user) => [
+                    'id' => $user->uuid,
+                    'name' => $user->name,
+                    'username' => $user->username,
+                    'avatar_url' => $user->avatar_url,
+                ])->values()->all(),
+
             'tagged' => $post->taggedUsers->map(fn (User $user) => [
                 'id' => $user->uuid,
                 'name' => $user->name,
                 'username' => $user->username,
             ])->values()->all(),
         ])->values()->all();
+    }
+
+
+    /** How many likers each post carries in its payload. */
+    private const LIKE_PREVIEW = 3;
+
+    /**
+     * The most recent few likers for each of a page of posts.
+     *
+     * One query for the whole page, using a window function to take the top N
+     * per post. The obvious alternatives are both wrong at scale: a query per
+     * post is 24 round trips for one grid, and fetching every like row for
+     * the page means loading thousands of rows to display three names.
+     *
+     * @param  list<int>  $postIds
+     * @return array<int, \Illuminate\Support\Collection<int, User>>
+     */
+    private function likePreviews(array $postIds): array
+    {
+        if ($postIds === []) {
+            return [];
+        }
+
+        $placeholders = implode(',', array_fill(0, count($postIds), '?'));
+
+        $rows = DB::select(
+            "SELECT post_id, user_id FROM (
+                SELECT post_id,
+                       user_id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY post_id ORDER BY created_at DESC, id DESC
+                       ) AS rn
+                FROM post_likes
+                WHERE post_id IN ({$placeholders})
+            ) ranked WHERE rn <= ".self::LIKE_PREVIEW,
+            $postIds,
+        );
+
+        if ($rows === []) {
+            return [];
+        }
+
+        $users = User::whereIn('id', array_unique(array_column($rows, 'user_id')))
+            ->get()
+            ->keyBy('id');
+
+        $byPost = [];
+
+        foreach ($rows as $row) {
+            $user = $users->get($row->user_id);
+
+            if ($user === null) {
+                continue;
+            }
+
+            $byPost[$row->post_id] ??= collect();
+            $byPost[$row->post_id]->push($user);
+        }
+
+        return $byPost;
     }
 
     /*
@@ -344,7 +418,20 @@ class PostService
             ]);
         }
 
-        return [(int) $size[0], (int) $size[1]];
+        [$width, $height] = [(int) $size[0], (int) $size[1]];
+
+        // Square through to 4:5 portrait is what the client offers, but the
+        // API is public and a 20:1 strip would wreck every grid it appeared
+        // in. Bounded generously so the rule never fights the UI.
+        $ratio = $height === 0 ? 0 : $width / $height;
+
+        if ($ratio < 0.5 || $ratio > 2.0) {
+            throw ValidationException::withMessages([
+                'image' => ['That photo is too tall or too wide. Crop it closer to a square.'],
+            ]);
+        }
+
+        return [$width, $height];
     }
 
     /** Only the author may remove their post. */
