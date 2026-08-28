@@ -265,7 +265,7 @@ class RelationshipService
      * photo still meant it for everyone outside their circle — opening your
      * profile is not the same as withdrawing that.
      */
-    private function avatarFor(User $viewer, User $target, bool $isFollower): ?string
+    public function avatarFor(User $viewer, User $target, bool $isFollower): ?string
     {
         if ($isFollower) {
             return $target->avatar_url;

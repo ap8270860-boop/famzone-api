@@ -167,6 +167,70 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
         });
 
         /*
+         | Chat.
+         |
+         | Messages travel over HTTP; the websocket only announces that one
+         | arrived. Every screen can rebuild itself from these endpoints
+         | alone, which is what makes a dropped socket a delay rather than a
+         | lost message.
+         */
+        Route::post('conversations', [V1Controller::class, 'startConversation'])
+            ->middleware('throttle:60,1')
+            ->name('conversations.store');
+
+        Route::get('conversations', [V1Controller::class, 'conversations'])
+            ->name('conversations.index');
+
+        /*
+         | Before conversations/{uuid}, so the literal segment is not
+         | swallowed by the parameter — the same ordering rule that puts
+         | users/search above users/{uuid}.
+         */
+        Route::get('conversations/unread-count', [V1Controller::class, 'chatUnreadCount'])
+            ->middleware('throttle:120,1')
+            ->name('conversations.unread');
+
+        Route::prefix('conversations/{uuid}')->name('conversations.')->group(function () {
+            Route::get('/', [V1Controller::class, 'showConversation'])->name('show');
+            Route::delete('/', [V1Controller::class, 'leaveConversation'])->name('leave');
+
+            Route::get('messages', [V1Controller::class, 'conversationMessages'])
+                ->name('messages');
+
+            Route::post('messages', [V1Controller::class, 'sendMessage'])
+                ->middleware('throttle:60,1')
+                ->name('messages.store');
+
+            /*
+             | Receipts are fired on every scroll and every arriving message,
+             | so they are throttled far looser than a mutation of their size
+             | would normally be. Both are idempotent no-ops when the
+             | watermark is already ahead.
+             */
+            Route::post('read', [V1Controller::class, 'markConversationRead'])
+                ->middleware('throttle:240,1')
+                ->name('read');
+
+            Route::post('delivered', [V1Controller::class, 'markConversationDelivered'])
+                ->middleware('throttle:240,1')
+                ->name('delivered');
+
+            Route::post('accept', [V1Controller::class, 'acceptConversation'])->name('accept');
+        });
+
+        Route::delete('messages/{uuid}', [V1Controller::class, 'deleteMessage'])
+            ->name('messages.destroy');
+
+        /*
+         | Presence heartbeat. Runs every 45 seconds for every foregrounded
+         | app, and writes one indexed column.
+         */
+        Route::post('presence/ping', [V1Controller::class, 'presencePing'])
+            ->middleware('throttle:120,1')
+            ->name('presence.ping');
+
+
+        /*
          | Profile. The username check runs on every keystroke (debounced), so
          | it gets a looser throttle than the mutations beside it.
          */

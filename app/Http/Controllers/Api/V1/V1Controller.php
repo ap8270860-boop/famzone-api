@@ -7,6 +7,9 @@ use App\Http\Requests\Api\V1\Auth\LoginRequest;
 use App\Http\Requests\Api\V1\Auth\RegisterRequest;
 use App\Http\Requests\Api\V1\Auth\SendOtpRequest;
 use App\Http\Requests\Api\V1\Auth\VerifyOtpRequest;
+use App\Http\Requests\Api\V1\Chat\ReceiptRequest;
+use App\Http\Requests\Api\V1\Chat\SendMessageRequest;
+use App\Http\Requests\Api\V1\Chat\StartConversationRequest;
 use App\Http\Requests\Api\V1\Posts\CreatePostRequest;
 use App\Http\Requests\Api\V1\Profile\UpdateAvatarRequest;
 use App\Http\Requests\Api\V1\Safety\CheckInRequest;
@@ -16,9 +19,14 @@ use App\Http\Requests\Api\V1\Social\RespondRequest;
 use App\Http\Requests\Api\V1\Profile\UpdatePasswordRequest;
 use App\Http\Requests\Api\V1\Profile\UpdateProfileRequest;
 use App\Http\Resources\Api\V1\UserResource;
+use App\Models\ConversationParticipant;
+use App\Models\Message;
 use App\Models\OtpCode;
 use App\Models\Post;
 use App\Models\User;
+use App\Services\Chat\ChatService;
+use App\Services\Chat\PresenceService;
+use App\Services\Chat\ReceiptService;
 use App\Services\Otp\Exceptions\OtpException;
 use App\Services\Otp\OtpService;
 use App\Services\Posts\PostService;
@@ -57,6 +65,9 @@ class V1Controller extends Controller
         private readonly NotificationService $notifier,
         private readonly BlockService $blocks,
         private readonly PostService $posts,
+        private readonly ChatService $chat,
+        private readonly ReceiptService $receipts,
+        private readonly PresenceService $presence,
     ) {
     }
 
@@ -1044,6 +1055,249 @@ class V1Controller extends Controller
         abort_if($post === null, 404, 'That post is not available.');
 
         return $post;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Chat
+    |--------------------------------------------------------------------------
+    |
+    | No broadcasting yet. These endpoints are the whole of the feature in
+    | this phase, on purpose: if the conversation works over plain HTTP with
+    | a pull to refresh, then the websocket that follows is an accelerator
+    | rather than a load-bearing part, and a dropped socket costs latency
+    | instead of messages.
+    |
+    */
+
+    /**
+     * GET /api/v1/conversations?state=accepted|pending&page=1
+     *
+     * The inbox. `state=pending` is the Requests tab — the same query, the
+     * same shape, a different set of threads.
+     */
+    public function conversations(Request $request): JsonResponse
+    {
+        $state = $request->string('state', ConversationParticipant::STATE_ACCEPTED)->toString();
+
+        abort_unless(
+            in_array($state, [
+                ConversationParticipant::STATE_ACCEPTED,
+                ConversationParticipant::STATE_PENDING,
+            ], true),
+            422,
+            'Unknown conversation state.',
+        );
+
+        return $this->ok(
+            $this->chat->inbox(
+                $request->user(),
+                $state,
+                max(1, (int) $request->integer('page', 1)),
+                (int) $request->integer('per_page', ChatService::INBOX_PER_PAGE),
+            ),
+            'OK',
+        );
+    }
+
+    /**
+     * GET /api/v1/conversations/unread-count
+     *
+     * Polled on cold start and whenever the app returns to the foreground,
+     * so it is deliberately one grouped query over an indexed column.
+     */
+    public function chatUnreadCount(Request $request): JsonResponse
+    {
+        return $this->ok($this->chat->unreadSummary($request->user()), 'OK');
+    }
+
+    /**
+     * POST /api/v1/conversations   {user_id}
+     *
+     * Opens the thread with somebody, creating it only if there is not one
+     * already. Safe to call every time the Message button is tapped — the
+     * pair key makes a second call return the first call's thread.
+     */
+    public function startConversation(StartConversationRequest $request): JsonResponse
+    {
+        $me = $request->user();
+
+        $conversation = $this->chat->findOrCreateDirect(
+            $me,
+            $this->findUser($request->targetUuid()),
+        );
+
+        return $this->ok(
+            $this->chat->presentConversation(
+                $me,
+                $this->chat->findConversation($me, $conversation->uuid),
+            ),
+            'OK',
+        );
+    }
+
+    /**
+     * GET /api/v1/conversations/{uuid}
+     */
+    public function showConversation(Request $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+
+        return $this->ok(
+            $this->chat->presentConversation($me, $this->chat->findConversation($me, $uuid)),
+            'OK',
+        );
+    }
+
+    /**
+     * GET /api/v1/conversations/{uuid}/messages?before=&after=&limit=
+     *
+     * `before` walks back through history as the user scrolls up. `after`
+     * fills the gap left by a dropped connection — the client passes the
+     * newest sequence number it already holds and receives everything since.
+     *
+     * Cursors are per-conversation sequence numbers starting at 1, so they
+     * order the thread without exposing anything about the database.
+     */
+    public function conversationMessages(Request $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+
+        return $this->ok(
+            $this->chat->history(
+                $me,
+                $this->chat->findConversation($me, $uuid),
+                $request->filled('before') ? (int) $request->integer('before') : null,
+                $request->filled('after') ? (int) $request->integer('after') : null,
+                (int) $request->integer('limit', Message::PER_PAGE),
+            ),
+            'OK',
+        );
+    }
+
+    /**
+     * POST /api/v1/conversations/{uuid}/messages   {client_uuid, body}
+     *
+     * Idempotent on client_uuid: a retry after a timeout returns the original
+     * message rather than creating a second one, and returns it as a success,
+     * because from the sender's point of view the message was sent.
+     */
+    public function sendMessage(SendMessageRequest $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+
+        $result = $this->chat->send(
+            $me,
+            $this->chat->findConversation($me, $uuid),
+            $request->payload(),
+        );
+
+        // 200 on a replay, 201 on a genuinely new message. The client keys off
+        // client_uuid either way, so the distinction is for logs and for
+        // anyone reading the network tab.
+        return $result['replayed']
+            ? $this->ok($result['message'], 'Already sent.')
+            : $this->created($result['message'], 'Sent.');
+    }
+
+    /**
+     * POST /api/v1/conversations/{uuid}/read   {message_id}
+     *
+     * Moves the read watermark, never backwards. Safe to fire on every scroll
+     * and every arriving message.
+     */
+    public function markConversationRead(ReceiptRequest $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+
+        return $this->ok(
+            $this->receipts->markRead(
+                $me,
+                $this->chat->findConversation($me, $uuid),
+                $request->messageUuid(),
+            ),
+            'OK',
+        );
+    }
+
+    /**
+     * POST /api/v1/conversations/{uuid}/delivered   {message_id}
+     */
+    public function markConversationDelivered(ReceiptRequest $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+
+        return $this->ok(
+            $this->receipts->markDelivered(
+                $me,
+                $this->chat->findConversation($me, $uuid),
+                $request->messageUuid(),
+            ),
+            'OK',
+        );
+    }
+
+    /**
+     * POST /api/v1/conversations/{uuid}/accept
+     */
+    public function acceptConversation(Request $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+
+        return $this->ok(
+            $this->chat->accept($me, $this->chat->findConversation($me, $uuid)),
+            'Request accepted.',
+        );
+    }
+
+    /**
+     * DELETE /api/v1/conversations/{uuid}
+     *
+     * Leaves the thread, or declines a request. The membership row survives
+     * so a later message reopens the same conversation rather than starting a
+     * second one beside it.
+     */
+    public function leaveConversation(Request $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+
+        $this->chat->leave($me, $this->chat->findConversation($me, $uuid));
+
+        return $this->ok(null, 'Conversation removed.');
+    }
+
+    /**
+     * DELETE /api/v1/messages/{uuid}
+     *
+     * Delete for everyone. Soft, so the other person's client can show a
+     * tombstone instead of losing a line out of the middle of the thread.
+     */
+    public function deleteMessage(Request $request, string $uuid): JsonResponse
+    {
+        $this->chat->deleteMessage($request->user(), $this->findMessage($uuid));
+
+        return $this->ok(null, 'Message deleted.');
+    }
+
+    /**
+     * POST /api/v1/presence/ping
+     *
+     * The heartbeat behind "online" and "last seen". Answers with the
+     * interval the client should use, so the window can be widened later
+     * without shipping a new build.
+     */
+    public function presencePing(Request $request): JsonResponse
+    {
+        return $this->ok($this->presence->ping($request->user()), 'OK');
+    }
+
+    private function findMessage(string $uuid): Message
+    {
+        $message = Message::with('sender:id,uuid')->where('uuid', $uuid)->first();
+
+        abort_if($message === null, 404, 'That message does not exist.');
+
+        return $message;
     }
 
     /*
