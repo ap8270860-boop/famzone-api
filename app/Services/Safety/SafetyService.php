@@ -27,9 +27,6 @@ class SafetyService
     public const STATE_ATTENTION = 'attention';
     public const STATE_ALERT = 'alert';
 
-    /** How many days the home screen's dot strip shows. */
-    private const RECENT_DAYS = 7;
-
     /*
     |--------------------------------------------------------------------------
     | Reads
@@ -108,25 +105,39 @@ class SafetyService
     }
 
     /**
-     * The last N local days, oldest first, each marked done or not.
+     * The current week, Sunday through Saturday, in the user's timezone.
      *
-     * One query for the window rather than one per day.
+     * A fixed calendar week rather than a rolling seven days. A rolling window
+     * starts on whatever weekday happened to be six days ago, so the strip
+     * silently re-orders itself every morning — the S M T W T F S labels
+     * shuffle, and a glance at it tells you nothing about *this* week.
+     *
+     * One query for the whole week rather than one per day.
      *
      * @return list<array<string, mixed>>
      */
     private function recent(User $user, CarbonImmutable $now): array
     {
-        $start = $now->subDays(self::RECENT_DAYS - 1)->toDateString();
+        // Carbon numbers dayOfWeek from 0 = Sunday, so subtracting it lands
+        // on this week's Sunday. Done arithmetically rather than through
+        // startOfWeek(), whose first-day argument has moved between Carbon
+        // versions and would silently give a Monday-based week.
+        $weekStart = $now->subDays($now->dayOfWeek)->startOfDay();
+        $weekEnd = $weekStart->addDays(6);
 
         $done = $user->checkIns()
-            ->whereBetween('check_in_date', [$start, $now->toDateString()])
+            ->whereBetween('check_in_date', [
+                $weekStart->toDateString(),
+                $weekEnd->toDateString(),
+            ])
             ->get(['check_in_date', 'status'])
             ->keyBy(fn (SafetyCheckIn $c) => $c->check_in_date->toDateString());
 
+        $today = $now->toDateString();
         $days = [];
 
-        for ($i = self::RECENT_DAYS - 1; $i >= 0; $i--) {
-            $day = $now->subDays($i);
+        for ($i = 0; $i < 7; $i++) {
+            $day = $weekStart->addDays($i);
             $date = $day->toDateString();
             $row = $done->get($date);
 
@@ -136,7 +147,12 @@ class SafetyService
                 'initial' => $day->format('D')[0],
                 'done' => $row !== null,
                 'status' => $row?->status,
-                'is_today' => $i === 0,
+                'is_today' => $date === $today,
+
+                // Later this week. The client draws these differently: an
+                // empty circle on a day that has not happened is not the same
+                // as an empty circle on one that was missed.
+                'is_future' => $day->greaterThan($now->startOfDay()),
             ];
         }
 
