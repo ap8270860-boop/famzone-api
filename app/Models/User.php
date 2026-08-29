@@ -126,7 +126,6 @@ class User extends Authenticatable
             'date_of_birth' => 'date',
 
             'last_seen_at' => 'datetime',
-            'is_online' => 'boolean',
             'show_last_seen' => 'boolean',
             'show_online_status' => 'boolean',
             'show_read_receipts' => 'boolean',
