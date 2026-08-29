@@ -50,6 +50,15 @@ class InboxUpdated implements ShouldBroadcast
     }
 
     /**
+     * Same dedicated queue as [MessageSent], so the badge and the bubble
+     * cannot drift apart by sitting in queues of different lengths.
+     */
+    public function broadcastQueue(): string
+    {
+        return 'broadcasts';
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function broadcastWith(): array

@@ -54,6 +54,20 @@ class MessageSent implements ShouldBroadcast
     }
 
     /**
+     * Its own queue, away from everything else.
+     *
+     * A chat message is the most latency-sensitive job in the system and one
+     * of the cheapest to run. Sharing the default queue would put it behind
+     * whatever slow work happens to be in front of it — a thumbnail, a batch
+     * of push notifications — and a message that takes eight seconds to
+     * appear reads as a broken app, not a busy one.
+     */
+    public function broadcastQueue(): string
+    {
+        return 'broadcasts';
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function broadcastWith(): array
