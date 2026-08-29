@@ -2,6 +2,7 @@
 
 namespace App\Services\Chat;
 
+use App\Events\Chat\ReceiptsUpdated;
 use App\Models\Conversation;
 use App\Models\ConversationParticipant;
 use App\Models\Message;
@@ -106,7 +107,38 @@ class ReceiptService
             $participant->forceFill($changes)->save();
         });
 
-        return $this->payload($conversation, $participant->refresh());
+        $participant->refresh();
+
+        $this->announce($conversation, $me, $participant);
+
+        return $this->payload($conversation, $participant);
+    }
+
+    /**
+     * Tell the other person the ticks moved.
+     *
+     * Dispatched after the transaction, like every other broadcast here — an
+     * event that arrives before its own write is visible is a bug that only
+     * shows up under load.
+     *
+     * Honours `show_read_receipts`. Somebody who has turned it off has their
+     * read watermark reported as their delivered one, so the sender sees two
+     * grey ticks and never a blue pair. Suppressing the event entirely would
+     * be worse: the delivered tick would stop working too, and the setting
+     * only promises to hide *reading*.
+     */
+    private function announce(
+        Conversation $conversation,
+        User $reader,
+        ConversationParticipant $participant,
+    ): void {
+        $delivered = $participant->last_delivered_seq;
+
+        $read = $reader->show_read_receipts
+            ? $participant->last_read_seq
+            : $delivered;
+
+        ReceiptsUpdated::dispatch($conversation, $reader, $read, $delivered);
     }
 
     /**

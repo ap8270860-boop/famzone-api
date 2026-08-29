@@ -598,7 +598,20 @@ class ChatService
                 $this->presentPerson($me, $other->user),
                 [
                     'state' => $other->state,
-                    'last_read_seq' => (int) $other->last_read_seq,
+                    /*
+                     | Read receipts are a setting, and it has to hold here as
+                     | well as over the socket. Somebody who has turned them
+                     | off reports their read watermark as their delivered
+                     | one, so the sender sees two grey ticks and never a blue
+                     | pair — including on a cold load, where the socket has
+                     | said nothing yet.
+                     |
+                     | Leaving this to the broadcast alone would mean the
+                     | setting worked until you pulled to refresh.
+                     */
+                    'last_read_seq' => (int) ($other->user->show_read_receipts
+                        ? $other->last_read_seq
+                        : $other->last_delivered_seq),
                     'last_delivered_seq' => (int) $other->last_delivered_seq,
                 ],
                 $this->presence->presenceFor($me, $other->user),

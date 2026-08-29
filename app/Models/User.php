@@ -331,6 +331,23 @@ class User extends Authenticatable
     |--------------------------------------------------------------------------
     */
 
+    /**
+     * The id other people see for you on a presence channel.
+     *
+     * Laravel puts this in the presence payload every other member of the
+     * channel receives, and it defaults to the primary key — which would put
+     * the internal auto-increment id straight in front of other users. The
+     * uuid is the only identifier allowed to leave the server, so it is the
+     * one that goes here.
+     *
+     * Easy to miss: nothing in the app reads it, and it only becomes visible
+     * once somebody inspects a websocket frame.
+     */
+    public function getAuthIdentifierForBroadcasting(): string
+    {
+        return $this->uuid;
+    }
+
     public function isActive(): bool
     {
         return $this->status === self::STATUS_ACTIVE;
