@@ -131,10 +131,17 @@ class ChatService
                 $conversation->save();
 
                 // The opener has accepted by definition — they started it.
-                $conversation->participants()->createMany([
-                    ['user_id' => $me->id, 'state' => ConversationParticipant::STATE_ACCEPTED],
-                    ['user_id' => $other->id, 'state' => $this->stateFor($other, $me)],
-                ]);
+                $this->addParticipant(
+                    $conversation,
+                    $me,
+                    ConversationParticipant::STATE_ACCEPTED,
+                );
+
+                $this->addParticipant(
+                    $conversation,
+                    $other,
+                    $this->stateFor($other, $me),
+                );
 
                 return $conversation;
             });
@@ -147,6 +154,33 @@ class ChatService
             // one that exists, so use it.
             return Conversation::where('pair_key', $key)->firstOrFail();
         }
+    }
+
+    /**
+     * Put one person in a conversation.
+     *
+     * The ids are assigned as properties rather than passed to the
+     * constructor, because they are deliberately not in the model's Fillable
+     * list. Which user a participant row belongs to is exactly the kind of
+     * column that must never be settable from request data — the guard is
+     * doing its job, so the service works with it rather than widening it.
+     *
+     * Mass assignment fails silently: createMany() dropped user_id without a
+     * word and left MySQL to complain about a column with no default. Worth
+     * remembering the next time a model refuses to save something obvious.
+     */
+    private function addParticipant(
+        Conversation $conversation,
+        User $user,
+        string $state,
+    ): ConversationParticipant {
+        $participant = new ConversationParticipant(['state' => $state]);
+
+        $participant->conversation_id = $conversation->id;
+        $participant->user_id = $user->id;
+        $participant->save();
+
+        return $participant;
     }
 
     /**
