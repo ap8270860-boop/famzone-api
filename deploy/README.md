@@ -76,6 +76,39 @@ REVERB_SERVER_PORT=8080
 `REVERB_APP_KEY` is public — it ships in the mobile app. `REVERB_APP_SECRET`
 signs channel authorisation and must never leave the server.
 
+## Upload size limits
+
+Chat attachments are capped at 25 MB in `AttachmentService`, but nginx and PHP
+both refuse an oversized body **before Laravel sees it** — and they answer with
+an HTML error page rather than the API envelope. The app cannot tell you which
+limit it hit, only that the upload failed.
+
+nginx defaults to **1 MB**, which is smaller than a single phone photo. In the
+`admin-cp.sfamily.co` server block:
+
+```nginx
+client_max_body_size 30M;
+```
+
+PHP defaults to 2 MB. In `/etc/php/8.3/fpm/php.ini`:
+
+```ini
+upload_max_filesize = 30M
+post_max_size = 32M
+```
+
+`post_max_size` must be larger than `upload_max_filesize` — a multipart body
+carries the file plus its field headers, and PHP checks the whole envelope
+against the smaller of the two.
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+sudo systemctl reload php8.3-fpm
+```
+
+Keep all three above the 25 MB the application enforces, so the limit the user
+runs into is the one with a readable error message attached to it.
+
 ## Raise the file descriptor limit
 
 Every open connection is a file descriptor. The default of 1024 caps the whole
