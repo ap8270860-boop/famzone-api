@@ -77,6 +77,24 @@ class Message extends Model
         return $this->hasMany(MessageAttachment::class);
     }
 
+    /**
+     * @return \Illuminate\Database\Eloquent\Relations\HasOne<MessageAttachment>
+     */
+    public function attachment(): \Illuminate\Database\Eloquent\Relations\HasOne
+    {
+        return $this->hasOne(MessageAttachment::class);
+    }
+
+    /** Whether this message is carrying a file rather than text. */
+    public function hasMedia(): bool
+    {
+        return in_array($this->type, [
+            self::TYPE_IMAGE,
+            self::TYPE_FILE,
+            self::TYPE_AUDIO,
+        ], true);
+    }
+
     public function isDeleted(): bool
     {
         return $this->trashed();

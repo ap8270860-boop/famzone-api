@@ -42,6 +42,15 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
         ->name('media.post');
 
     /*
+     | Signed chat media. Same contract as the avatar and post routes above:
+     | the signature in the query string is the credential, so the link works
+     | inside a plain <img> tag.
+     */
+    Route::get('media/chat/{uuid}', [V1Controller::class, 'streamAttachment'])
+        ->middleware('signed')
+        ->name('media.chat');
+
+    /*
      | Public authentication.
      |
      | Throttled harder than the default: these endpoints send SMS and guess
@@ -174,6 +183,15 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
          | alone, which is what makes a dropped socket a delay rather than a
          | lost message.
          */
+        /*
+         | Step one of sending a file. Throttled hard — this is the most
+         | expensive endpoint in the API, and the only one where a single
+         | request can cost 25 MB of disk.
+         */
+        Route::post('uploads', [V1Controller::class, 'uploadAttachment'])
+            ->middleware('throttle:30,1')
+            ->name('uploads.store');
+
         Route::post('conversations', [V1Controller::class, 'startConversation'])
             ->middleware('throttle:60,1')
             ->name('conversations.store');

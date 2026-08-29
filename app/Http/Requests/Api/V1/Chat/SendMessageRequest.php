@@ -37,11 +37,31 @@ class SendMessageRequest extends FormRequest
              */
             'client_uuid' => ['required', 'uuid'],
 
-            // Only text is accepted until the media phase. The column already
-            // knows about the other types; the endpoint does not yet.
-            'type' => ['sometimes', Rule::in([Message::TYPE_TEXT])],
+            'type' => ['sometimes', Rule::in([
+                Message::TYPE_TEXT,
+                Message::TYPE_IMAGE,
+                Message::TYPE_FILE,
+                Message::TYPE_AUDIO,
+            ])],
 
-            'body' => ['required', 'string', 'min:1', 'max:'.Message::BODY_MAX],
+            /*
+             | Text is required for a text message and optional for anything
+             | else, where it becomes the caption. A photo with nothing
+             | written under it is a perfectly ordinary message; an empty text
+             | message is not.
+             */
+            'body' => [
+                Rule::requiredIf(fn () => $this->input('type', Message::TYPE_TEXT) === Message::TYPE_TEXT),
+                'nullable', 'string', 'max:'.Message::BODY_MAX,
+            ],
+
+            // The id returned by POST /uploads. Required for every type but
+            // text — the service checks it belongs to the sender and has not
+            // already been used.
+            'upload_id' => [
+                Rule::requiredIf(fn () => $this->input('type', Message::TYPE_TEXT) !== Message::TYPE_TEXT),
+                'nullable', 'uuid',
+            ],
         ];
     }
 
@@ -71,7 +91,7 @@ class SendMessageRequest extends FormRequest
     }
 
     /**
-     * @return array{client_uuid: string, type: string, body: ?string}
+     * @return array{client_uuid: string, type: string, body: ?string, upload_id: ?string}
      */
     public function payload(): array
     {
@@ -79,6 +99,7 @@ class SendMessageRequest extends FormRequest
             'client_uuid' => (string) $this->input('client_uuid'),
             'type' => (string) $this->input('type'),
             'body' => $this->input('body'),
+            'upload_id' => $this->input('upload_id'),
         ];
     }
 }

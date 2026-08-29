@@ -10,6 +10,7 @@ use App\Http\Requests\Api\V1\Auth\VerifyOtpRequest;
 use App\Http\Requests\Api\V1\Chat\ReceiptRequest;
 use App\Http\Requests\Api\V1\Chat\SendMessageRequest;
 use App\Http\Requests\Api\V1\Chat\StartConversationRequest;
+use App\Http\Requests\Api\V1\Chat\UploadRequest;
 use App\Http\Requests\Api\V1\Posts\CreatePostRequest;
 use App\Http\Requests\Api\V1\Profile\UpdateAvatarRequest;
 use App\Http\Requests\Api\V1\Safety\CheckInRequest;
@@ -21,9 +22,11 @@ use App\Http\Requests\Api\V1\Profile\UpdateProfileRequest;
 use App\Http\Resources\Api\V1\UserResource;
 use App\Models\ConversationParticipant;
 use App\Models\Message;
+use App\Models\MessageAttachment;
 use App\Models\OtpCode;
 use App\Models\Post;
 use App\Models\User;
+use App\Services\Chat\AttachmentService;
 use App\Services\Chat\ChatService;
 use App\Services\Chat\PresenceService;
 use App\Services\Chat\ReceiptService;
@@ -68,6 +71,7 @@ class V1Controller extends Controller
         private readonly ChatService $chat,
         private readonly ReceiptService $receipts,
         private readonly PresenceService $presence,
+        private readonly AttachmentService $attachments,
     ) {
     }
 
@@ -1291,9 +1295,61 @@ class V1Controller extends Controller
         return $this->ok($this->presence->ping($request->user()), 'OK');
     }
 
+    /**
+     * POST /api/v1/uploads   (multipart: file, type)
+     *
+     * Step one of sending a file. Answers with an id; step two is a normal
+     * send carrying `upload_id`.
+     *
+     * Two steps rather than one fat request: a 25 MB file has no business
+     * holding a chat request open, and — more to the point — the message row
+     * is not written until the bytes have landed. A message broadcast ahead
+     * of its file shows every recipient a broken attachment.
+     *
+     * An upload that is never sent is harmless; `chat:prune-uploads` sweeps
+     * it up after a day.
+     */
+    public function uploadAttachment(UploadRequest $request): JsonResponse
+    {
+        $attachment = $this->attachments->upload(
+            $request->user(),
+            $request->file('file'),
+            (string) $request->input('type'),
+        );
+
+        return $this->created(
+            $this->attachments->present($attachment),
+            'Uploaded.',
+        );
+    }
+
+    /**
+     * GET /api/v1/media/chat/{uuid}   (signed)
+     *
+     * Streams an attachment. Not behind auth:sanctum on purpose — the
+     * signature is the credential, which is what lets the URL go straight
+     * into an <img> tag.
+     */
+    public function streamAttachment(Request $request, string $uuid): StreamedResponse
+    {
+        $attachment = MessageAttachment::where('uuid', $uuid)->first();
+
+        abort_if($attachment === null, 404);
+
+        $disk = Storage::disk($attachment->disk ?: config('filesystems.default'));
+
+        abort_unless($disk->exists($attachment->path), 404);
+
+        return $disk->response($attachment->path, $attachment->original_name, [
+            'Cache-Control' => 'private, max-age=3600',
+        ]);
+    }
+
     private function findMessage(string $uuid): Message
     {
-        $message = Message::with('sender:id,uuid')->where('uuid', $uuid)->first();
+        $message = Message::with(['sender:id,uuid', 'attachment'])
+            ->where('uuid', $uuid)
+            ->first();
 
         abort_if($message === null, 404, 'That message does not exist.');
 

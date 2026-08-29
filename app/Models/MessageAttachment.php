@@ -16,7 +16,10 @@ use Illuminate\Support\Str;
  *
  * @property-read Message $message
  */
-#[Fillable(['disk', 'path', 'mime', 'size_bytes', 'width', 'height', 'duration_ms', 'waveform'])]
+#[Fillable([
+    'disk', 'path', 'mime', 'original_name', 'size_bytes',
+    'width', 'height', 'duration_ms', 'waveform',
+])]
 class MessageAttachment extends Model
 {
     protected static function booted(): void

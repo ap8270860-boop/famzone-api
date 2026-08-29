@@ -77,7 +77,7 @@ class MessageSent implements ShouldBroadcast
         // HTTP are indistinguishable to the client. Never a serialised
         // model — that is how internal ids end up on the wire.
         return app(ChatService::class)->presentMessage(
-            $this->message->loadMissing('sender:id,uuid'),
+            $this->message->loadMissing(['sender:id,uuid', 'attachment']),
         );
     }
 

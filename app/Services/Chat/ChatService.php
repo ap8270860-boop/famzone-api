@@ -9,6 +9,7 @@ use App\Models\Conversation;
 use App\Models\ConversationParticipant;
 use App\Models\Follow;
 use App\Models\Message;
+use App\Models\MessageAttachment;
 use App\Models\User;
 use App\Services\Social\RelationshipService;
 use Illuminate\Database\Eloquent\Builder;
@@ -50,6 +51,7 @@ class ChatService
     public function __construct(
         private readonly RelationshipService $relationships,
         private readonly PresenceService $presence,
+        private readonly AttachmentService $attachments,
     ) {
     }
 
@@ -260,7 +262,11 @@ class ChatService
         $total = (clone $query)->count();
 
         $conversations = $query
-            ->with(['participants.user', 'lastMessage.sender:id,uuid'])
+            ->with([
+                'participants.user',
+                'lastMessage.sender:id,uuid',
+                'lastMessage.attachment',
+            ])
             ->forPage($page, $perPage)
             ->get();
 
@@ -371,7 +377,7 @@ class ChatService
 
         $query = $conversation->messages()
             ->withTrashed()
-            ->with('sender:id,uuid');
+            ->with(['sender:id,uuid', 'attachment']);
 
         if ($after !== null) {
             $messages = (clone $query)->where('seq', '>', $after)
@@ -531,6 +537,23 @@ class ChatService
         $message->seq = $seq;
         $message->save();
 
+        /*
+         | Adopt the upload, inside the same transaction as the message.
+         |
+         | If this throws — the upload belongs to somebody else, or has
+         | already been sent — the message is rolled back with it. A message
+         | that exists but points at nothing would render as a permanently
+         | broken attachment on the recipient's screen, with no way back.
+         */
+        if ($message->hasMedia() && filled($payload['upload_id'] ?? null)) {
+            $this->attachments->attach($sender, $message, $payload['upload_id']);
+
+            $message->setRelation(
+                'attachment',
+                MessageAttachment::where('message_id', $message->id)->first(),
+            );
+        }
+
         $locked->forceFill([
             'last_seq' => $seq,
             'last_message_id' => $message->id,
@@ -601,6 +624,16 @@ class ChatService
             // the person who wrote it. "Deleted" has to mean deleted.
             'body' => $deleted ? null : $message->body,
             'deleted' => $deleted,
+
+            /*
+             | Dropped entirely once deleted, along with the body. "Deleted"
+             | has to mean deleted — leaving a live signed link behind would
+             | make the word a lie, and the file is still on disk.
+             */
+            'attachment' => $deleted || $message->attachment === null
+                ? null
+                : $this->attachments->present($message->attachment),
+
             'edited_at' => $message->edited_at?->toIso8601String(),
             'created_at' => $message->created_at->toIso8601String(),
         ];
@@ -738,7 +771,7 @@ class ChatService
     private function findByClientUuid(Conversation $conversation, string $clientUuid): ?Message
     {
         return Message::withTrashed()
-            ->with('sender:id,uuid')
+            ->with(['sender:id,uuid', 'attachment'])
             ->where('conversation_id', $conversation->id)
             ->where('client_uuid', $clientUuid)
             ->first();
