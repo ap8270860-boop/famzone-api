@@ -18,6 +18,23 @@ return Application::configure(basePath: dirname(__DIR__))
         commands: __DIR__.'/../routes/console.php',
         health: '/up',
     )
+    /*
+     | Broadcasting authorisation.
+     |
+     | Published under the API prefix and behind auth:sanctum, which is the
+     | whole trick for a mobile client. Left at its default the endpoint sits
+     | in the `web` group and expects a session cookie, so a Flutter app
+     | holding a bearer token gets a 403 — or worse, a redirect to a login
+     | route that does not exist.
+     |
+     | Confirm the resolved path after changing this:
+     |
+     |   php artisan route:list --path=broadcasting
+     */
+    ->withBroadcasting(
+        __DIR__.'/../routes/channels.php',
+        ['prefix' => 'api/v1', 'middleware' => ['api', 'auth:sanctum']],
+    )
     ->withMiddleware(function (Middleware $middleware): void {
         // Nginx terminates TLS and proxies to PHP-FPM over http, so without
         // this Laravel builds http:// URLs for an https:// request. Signed

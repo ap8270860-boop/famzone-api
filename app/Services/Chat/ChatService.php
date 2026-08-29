@@ -2,6 +2,8 @@
 
 namespace App\Services\Chat;
 
+use App\Events\Chat\InboxUpdated;
+use App\Events\Chat\MessageSent;
 use App\Models\Block;
 use App\Models\Conversation;
 use App\Models\ConversationParticipant;
@@ -378,7 +380,44 @@ class ChatService
             return ['message' => $this->presentMessage($message), 'replayed' => true];
         }
 
+        $this->announce($conversation, $message);
+
         return ['message' => $this->presentMessage($message), 'replayed' => false];
+    }
+
+    /**
+     * Tell everyone who should know.
+     *
+     * Called after DB::transaction() has returned, which is to say after the
+     * commit. Dispatching from inside the transaction is the classic way to
+     * break this: the event reaches the recipient, the recipient fetches the
+     * message, and the row is not visible yet. It only shows up under load,
+     * which is the worst time to find it.
+     *
+     * Two events, two jobs. The conversation channel repaints an open chat
+     * screen; each recipient's own channel keeps their inbox ordered and
+     * their badge correct while no chat screen is open. Publishing only one
+     * of them leaves the other wrong.
+     *
+     * Replays are deliberately silent. A retry of a message that already
+     * arrived must not make it arrive twice.
+     */
+    private function announce(Conversation $conversation, Message $message): void
+    {
+        MessageSent::dispatch($message);
+
+        // Re-queried rather than read off the loaded relation. persist() can
+        // pull somebody back into a thread they had left, and the in-memory
+        // copy still says they are gone — which would silently drop the one
+        // notification that matters most.
+        $participants = $conversation->participants()
+            ->with('user')
+            ->whereNull('left_at')
+            ->get();
+
+        foreach ($participants as $participant) {
+            InboxUpdated::dispatch($conversation, $participant->user);
+        }
     }
 
     /**
