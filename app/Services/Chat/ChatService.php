@@ -53,6 +53,49 @@ class ChatService
     ) {
     }
 
+    /**
+     * Everybody the current caller cannot interact with, fetched once.
+     *
+     * An inbox page presents 25 conversations and each one needs to know
+     * whether a wall stands between the two people. Asking per row is 25
+     * queries for a fact that does not change inside one request; asking once
+     * is one query and an array lookup.
+     *
+     * Keyed by user id because a request only ever presents for one viewer,
+     * but keying it means a queued job presenting for several cannot poison
+     * the answer for the others.
+     *
+     * @var array<int, array<int, true>>
+     */
+    private array $walls = [];
+
+    /**
+     * @return array<int, true>
+     */
+    private function wall(User $viewer): array
+    {
+        if (isset($this->walls[$viewer->id])) {
+            return $this->walls[$viewer->id];
+        }
+
+        $ids = [];
+
+        // Both columns in one pass. Block::wallIds() exists for composing into
+        // a whereNotIn and returns an unaliased CASE expression, which is
+        // exactly wrong for reading values out.
+        Block::query()
+            ->where('blocker_id', $viewer->id)
+            ->orWhere('blocked_id', $viewer->id)
+            ->get(['blocker_id', 'blocked_id'])
+            ->each(function (Block $block) use ($viewer, &$ids) {
+                $ids[$block->blocker_id === $viewer->id
+                    ? $block->blocked_id
+                    : $block->blocker_id] = true;
+            });
+
+        return $this->walls[$viewer->id] = $ids;
+    }
+
     /*
     |--------------------------------------------------------------------------
     | Permission
@@ -583,6 +626,21 @@ class ChatService
             'last_message' => $conversation->lastMessage
                 ? $this->presentMessage($conversation->lastMessage)
                 : null,
+
+            /*
+             | Whether a wall stands between these two, in either direction.
+             |
+             | The client needs this to disable the composer and say why.
+             | Without it, a blocked thread looks perfectly normal until you
+             | type something and get a 403 — which is a worse way to find out
+             | and tells you nothing about what to do next.
+             |
+             | Deliberately not `blocked_by_me`: the person who was blocked
+             | must not be able to tell the difference between being blocked
+             | and the other account having gone quiet.
+             */
+            'blocked' => $other !== null
+                && isset($this->wall($me)[$other->user_id]),
 
             // My own watermarks, so a client returning after being offline
             // knows where it left off without guessing.

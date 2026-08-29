@@ -2,7 +2,9 @@
 
 namespace App\Services\Social;
 
+use App\Events\Chat\ConversationClosed;
 use App\Models\Block;
+use App\Models\Conversation;
 use App\Models\FamilyMember;
 use App\Models\Follow;
 use App\Models\User;
@@ -41,7 +43,7 @@ class BlockService
             ]);
         }
 
-        return DB::transaction(function () use ($actor, $target, $reason): Block {
+        $block = DB::transaction(function () use ($actor, $target, $reason): Block {
             $existing = Block::where('blocker_id', $actor->id)
                 ->where('blocked_id', $target->id)
                 ->lockForUpdate()
@@ -62,6 +64,42 @@ class BlockService
 
             return $block;
         });
+
+        $this->closeConversation($actor, $target);
+
+        return $block;
+    }
+
+    /**
+     * Tell both clients to let go of the thread.
+     *
+     * Channel authorisation runs once, on subscribe. Somebody already
+     * listening when the block lands would keep receiving messages on that
+     * channel forever, because nothing asks the server a second time. This is
+     * what closes that window.
+     *
+     * Both sides, not just the blocked one: the person who blocked has the
+     * thread filtered out of their inbox on the next load, but if they happen
+     * to have it open right now, nothing else would tell them.
+     *
+     * Nothing is deleted. Blocking ends a relationship; it is not a retraction
+     * of things that were already said, and quietly destroying somebody's copy
+     * of a conversation is a surprising, unrecoverable side effect of a button
+     * labelled "Block".
+     */
+    private function closeConversation(User $actor, User $target): void
+    {
+        $conversation = Conversation::where(
+            'pair_key',
+            Conversation::pairKey($actor->id, $target->id),
+        )->first();
+
+        if ($conversation === null) {
+            return;
+        }
+
+        ConversationClosed::dispatch($conversation, $actor);
+        ConversationClosed::dispatch($conversation, $target);
     }
 
     /**
