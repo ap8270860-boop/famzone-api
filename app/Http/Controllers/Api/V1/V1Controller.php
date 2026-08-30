@@ -2,12 +2,15 @@
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Events\Chat\ConversationPinned;
 use App\Events\Chat\MessageReacted;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Api\V1\Auth\LoginRequest;
 use App\Http\Requests\Api\V1\Auth\RegisterRequest;
 use App\Http\Requests\Api\V1\Auth\SendOtpRequest;
 use App\Http\Requests\Api\V1\Auth\VerifyOtpRequest;
+use App\Http\Requests\Api\V1\Chat\ForwardRequest;
+use App\Http\Requests\Api\V1\Chat\PinRequest;
 use App\Http\Requests\Api\V1\Chat\ReactRequest;
 use App\Http\Requests\Api\V1\Chat\ReceiptRequest;
 use App\Http\Requests\Api\V1\Chat\SendMessageRequest;
@@ -30,6 +33,7 @@ use App\Models\Post;
 use App\Models\User;
 use App\Services\Chat\AttachmentService;
 use App\Services\Chat\ChatService;
+use App\Services\Chat\MessageActionService;
 use App\Services\Chat\PresenceService;
 use App\Services\Chat\ReactionService;
 use App\Services\Chat\ReceiptService;
@@ -76,6 +80,7 @@ class V1Controller extends Controller
         private readonly PresenceService $presence,
         private readonly AttachmentService $attachments,
         private readonly ReactionService $reactions,
+        private readonly MessageActionService $messageActions,
     ) {
     }
 
@@ -1382,6 +1387,101 @@ class V1Controller extends Controller
                 $updated->loadMissing(['sender:id,uuid', 'attachment', 'replyTo.sender:id,uuid']),
             ),
             'OK',
+        );
+    }
+
+    /**
+     * POST /api/v1/messages/{uuid}/star
+     *
+     * Toggles. Private to the caller: nothing is broadcast, and the other
+     * person in the thread has no way to learn you kept something.
+     */
+    public function starMessage(Request $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+        $message = $this->findMessage($uuid);
+
+        // Membership check — a message id alone must not be enough.
+        $this->chat->findConversation($me, $message->conversation->uuid);
+
+        $starred = $this->messageActions->toggleStar($me, $message);
+
+        return $this->ok(
+            ['starred' => $starred],
+            $starred ? 'Starred.' : 'Removed from starred.',
+        );
+    }
+
+    /**
+     * GET /api/v1/starred-messages?page=1
+     *
+     * Only from threads the caller is still in — leaving a conversation, or
+     * being blocked out of one, takes its messages out of here too.
+     */
+    public function starredMessages(Request $request): JsonResponse
+    {
+        return $this->ok(
+            $this->messageActions->starred(
+                $request->user(),
+                max(1, (int) $request->integer('page', 1)),
+            ),
+            'OK',
+        );
+    }
+
+    /**
+     * POST /api/v1/messages/{uuid}/forward   {conversation_ids: []}
+     *
+     * A new message in each target, never a reference to the original: the
+     * recipient must not gain access to the thread it came from, and a shared
+     * row would mean deleting the original deletes every forward of it.
+     */
+    public function forwardMessage(ForwardRequest $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+
+        $sent = $this->messageActions->forward(
+            $me,
+            $this->findMessage($uuid),
+            $request->targets(),
+        );
+
+        // Announced after every write has committed, the same as an ordinary
+        // send — each target thread gets its own message and inbox events.
+        foreach ($sent as $message) {
+            $this->chat->announce($message->conversation, $message);
+        }
+
+        return $this->ok(
+            ['count' => count($sent)],
+            count($sent) === 1 ? 'Forwarded.' : 'Forwarded to '.count($sent).' chats.',
+        );
+    }
+
+    /**
+     * POST /api/v1/conversations/{uuid}/pin   {message_id}
+     *
+     * Shared by both people, so either can set or clear it and both banners
+     * move together. `message_id: null` unpins.
+     */
+    public function pinMessage(PinRequest $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+        $conversation = $this->chat->findConversation($me, $uuid);
+
+        $messageUuid = $request->messageUuid();
+
+        $updated = $this->messageActions->pin(
+            $me,
+            $conversation,
+            $messageUuid === null ? null : $this->findMessage($messageUuid),
+        );
+
+        ConversationPinned::dispatch($updated);
+
+        return $this->ok(
+            $this->chat->presentConversation($me, $updated),
+            $messageUuid === null ? 'Unpinned.' : 'Pinned.',
         );
     }
 

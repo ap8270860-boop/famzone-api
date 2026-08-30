@@ -36,6 +36,7 @@ class Conversation extends Model
         return [
             'last_seq' => 'integer',
             'last_message_at' => 'datetime',
+            'pinned_at' => 'datetime',
         ];
     }
 
@@ -69,6 +70,20 @@ class Conversation extends Model
     public function messages(): HasMany
     {
         return $this->hasMany(Message::class);
+    }
+
+    /**
+     * The message pinned in this thread, shared by everyone in it.
+     *
+     * withTrashed so a pinned message that is later deleted shows as a
+     * tombstone rather than the banner silently emptying — the service
+     * clears the pin deliberately instead.
+     *
+     * @return BelongsTo<Message, Conversation>
+     */
+    public function pinnedMessage(): BelongsTo
+    {
+        return $this->belongsTo(Message::class, 'pinned_message_id')->withTrashed();
     }
 
     /**

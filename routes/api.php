@@ -234,6 +234,14 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
                 ->name('delivered');
 
             Route::post('accept', [V1Controller::class, 'acceptConversation'])->name('accept');
+
+            /*
+             | Pinning. One message at a time, shared by both people, so this
+             | is pin, replace and unpin in a single write.
+             */
+            Route::post('pin', [V1Controller::class, 'pinMessage'])
+                ->middleware('throttle:60,1')
+                ->name('pin');
         });
 
         Route::delete('messages/{uuid}', [V1Controller::class, 'deleteMessage'])
@@ -243,6 +251,23 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
          | Reactions. One row per person per message, so this is add, change
          | and remove in a single endpoint — `emoji: null` takes yours off.
          */
+        /*
+         | Starred messages. Private to the caller — nothing about a star is
+         | ever broadcast, and the other person cannot tell.
+         |
+         | Before messages/{uuid}, so the literal segment is not swallowed.
+         */
+        Route::get('starred-messages', [V1Controller::class, 'starredMessages'])
+            ->name('messages.starred');
+
+        Route::post('messages/{uuid}/star', [V1Controller::class, 'starMessage'])
+            ->middleware('throttle:120,1')
+            ->name('messages.star');
+
+        Route::post('messages/{uuid}/forward', [V1Controller::class, 'forwardMessage'])
+            ->middleware('throttle:30,1')
+            ->name('messages.forward');
+
         Route::post('messages/{uuid}/react', [V1Controller::class, 'reactToMessage'])
             ->middleware('throttle:120,1')
             ->name('messages.react');

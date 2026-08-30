@@ -50,7 +50,11 @@ class Message extends Model
      */
     protected function casts(): array
     {
-        return ['seq' => 'integer', 'edited_at' => 'datetime'];
+        return [
+            'seq' => 'integer',
+            'forwarded' => 'boolean',
+            'edited_at' => 'datetime',
+        ];
     }
 
     /**

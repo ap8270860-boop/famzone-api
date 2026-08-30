@@ -268,6 +268,7 @@ class ChatService
                 'participants.user',
                 'lastMessage.sender:id,uuid',
                 'lastMessage.attachment',
+                'pinnedMessage.sender:id,uuid',
             ])
             ->forPage($page, $perPage)
             ->get();
@@ -492,7 +493,7 @@ class ChatService
      * Replays are deliberately silent. A retry of a message that already
      * arrived must not make it arrive twice.
      */
-    private function announce(Conversation $conversation, Message $message): void
+    public function announce(Conversation $conversation, Message $message): void
     {
         MessageSent::dispatch($message);
 
@@ -640,7 +641,7 @@ class ChatService
     /**
      * @return array<string, mixed>
      */
-    public function presentMessage(Message $message): array
+    public function presentMessage(Message $message, ?array $starred = null): array
     {
         $deleted = $message->trashed();
 
@@ -654,6 +655,18 @@ class ChatService
             // the person who wrote it. "Deleted" has to mean deleted.
             'body' => $deleted ? null : $message->body,
             'deleted' => $deleted,
+            'forwarded' => (bool) $message->forwarded,
+
+            /*
+             | Whether the viewer starred it.
+             |
+             | Passed in as a set for the whole page rather than
+             | queried per message — a scrollback of forty would
+             | otherwise be forty queries for a boolean. Null means
+             | the caller has no viewer (a broadcast, say), and a
+             | message nobody is looking at is starred by nobody.
+             */
+            'starred' => $starred !== null && isset($starred[$message->id]),
 
             /*
              | Dropped entirely once deleted, along with the body. "Deleted"
@@ -741,6 +754,11 @@ class ChatService
             'blocked' => $other !== null
                 && isset($this->wall($me)[$other->user_id]),
 
+            // Shared by both people, unlike a star.
+            'pinned_message' => $conversation->pinnedMessage === null
+                ? null
+                : $this->presentMessage($conversation->pinnedMessage),
+
             // My own watermarks, so a client returning after being offline
             // knows where it left off without guessing.
             'me' => [
@@ -777,6 +795,49 @@ class ChatService
     }
 
     /**
+     * The other person in a direct thread, summarised.
+     *
+     * Public because the Starred screen lists messages from many threads and
+     * has to say which one each came from.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function otherPersonSummary(User $viewer, Conversation $conversation): ?array
+    {
+        $other = $this->otherParticipant($conversation, $viewer);
+
+        return $other === null ? null : $this->presentPerson($viewer, $other->user);
+    }
+
+    /**
+     * Move the sender's watermarks to a message they just wrote, and give
+     * everybody else one unread.
+     *
+     * Extracted so forwarding does the same bookkeeping as sending. A
+     * forwarded message that left the sender's own unread count sitting at
+     * one would put a badge on a conversation they were just looking at.
+     */
+    public function markSenderCaughtUp(Conversation $conversation, User $sender, int $seq): void
+    {
+        ConversationParticipant::where('conversation_id', $conversation->id)
+            ->where('user_id', $sender->id)
+            ->update([
+                'last_read_seq' => $seq,
+                'last_delivered_seq' => $seq,
+                'unread_count' => 0,
+                'updated_at' => now(),
+            ]);
+
+        ConversationParticipant::where('conversation_id', $conversation->id)
+            ->where('user_id', '!=', $sender->id)
+            ->whereNull('left_at')
+            ->update([
+                'unread_count' => DB::raw('unread_count + 1'),
+                'updated_at' => now(),
+            ]);
+    }
+
+    /**
      * @return array<string, mixed>
      */
     private function presentPerson(User $viewer, User $person): array
@@ -802,7 +863,11 @@ class ChatService
 
     public function findConversation(User $me, string $uuid): Conversation
     {
-        $conversation = Conversation::with(['participants.user', 'lastMessage.sender:id,uuid'])
+        $conversation = Conversation::with([
+            'participants.user',
+            'lastMessage.sender:id,uuid',
+            'pinnedMessage.sender:id,uuid',
+        ])
             ->where('uuid', $uuid)
             ->first();
 
