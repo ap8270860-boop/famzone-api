@@ -53,6 +53,7 @@ class ChatService
         private readonly RelationshipService $relationships,
         private readonly PresenceService $presence,
         private readonly AttachmentService $attachments,
+        private readonly ReactionService $reactions,
     ) {
     }
 
@@ -382,6 +383,7 @@ class ChatService
                 'sender:id,uuid',
                 'attachment',
                 'replyTo.sender:id,uuid',
+                'reactions.user:id,uuid',
             ]);
 
         if ($after !== null) {
@@ -664,6 +666,12 @@ class ChatService
 
             'reply_to' => $this->presentQuote($message->replyTo),
 
+            // Dropped with the body once deleted — a tombstone with
+            // six laughing faces on it is nobody's idea of good taste.
+            'reactions' => $deleted
+                ? []
+                : $this->reactions->present($message),
+
             'edited_at' => $message->edited_at?->toIso8601String(),
             'created_at' => $message->created_at->toIso8601String(),
         ];
@@ -829,7 +837,12 @@ class ChatService
     private function findByClientUuid(Conversation $conversation, string $clientUuid): ?Message
     {
         return Message::withTrashed()
-            ->with(['sender:id,uuid', 'attachment', 'replyTo.sender:id,uuid'])
+            ->with([
+                'sender:id,uuid',
+                'attachment',
+                'replyTo.sender:id,uuid',
+                'reactions.user:id,uuid',
+            ])
             ->where('conversation_id', $conversation->id)
             ->where('client_uuid', $clientUuid)
             ->first();

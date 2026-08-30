@@ -240,6 +240,14 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
             ->name('messages.destroy');
 
         /*
+         | Reactions. One row per person per message, so this is add, change
+         | and remove in a single endpoint — `emoji: null` takes yours off.
+         */
+        Route::post('messages/{uuid}/react', [V1Controller::class, 'reactToMessage'])
+            ->middleware('throttle:120,1')
+            ->name('messages.react');
+
+        /*
          | Presence heartbeat. Runs every 45 seconds for every foregrounded
          | app, and writes one indexed column.
          */

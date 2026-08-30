@@ -2,11 +2,13 @@
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Events\Chat\MessageReacted;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Api\V1\Auth\LoginRequest;
 use App\Http\Requests\Api\V1\Auth\RegisterRequest;
 use App\Http\Requests\Api\V1\Auth\SendOtpRequest;
 use App\Http\Requests\Api\V1\Auth\VerifyOtpRequest;
+use App\Http\Requests\Api\V1\Chat\ReactRequest;
 use App\Http\Requests\Api\V1\Chat\ReceiptRequest;
 use App\Http\Requests\Api\V1\Chat\SendMessageRequest;
 use App\Http\Requests\Api\V1\Chat\StartConversationRequest;
@@ -29,6 +31,7 @@ use App\Models\User;
 use App\Services\Chat\AttachmentService;
 use App\Services\Chat\ChatService;
 use App\Services\Chat\PresenceService;
+use App\Services\Chat\ReactionService;
 use App\Services\Chat\ReceiptService;
 use App\Services\Otp\Exceptions\OtpException;
 use App\Services\Otp\OtpService;
@@ -72,6 +75,7 @@ class V1Controller extends Controller
         private readonly ReceiptService $receipts,
         private readonly PresenceService $presence,
         private readonly AttachmentService $attachments,
+        private readonly ReactionService $reactions,
     ) {
     }
 
@@ -1343,6 +1347,42 @@ class V1Controller extends Controller
         return $disk->response($attachment->path, $attachment->original_name, [
             'Cache-Control' => 'private, max-age=3600',
         ]);
+    }
+
+    /**
+     * POST /api/v1/messages/{uuid}/react   {emoji}
+     *
+     * Add, change or remove a reaction. One endpoint for all three, because
+     * the unique index means it is one row either way — `emoji: null` takes
+     * yours off, and sending the same emoji twice does the same thing.
+     *
+     * Answers with the whole message so the caller can repaint the bubble
+     * from one response, and broadcasts the same set to the other person.
+     */
+    public function reactToMessage(ReactRequest $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+        $message = $this->findMessage($uuid);
+
+        // Membership check. Without it anybody holding a message id could
+        // react into a conversation they have never been part of.
+        $conversation = $this->chat->findConversation(
+            $me,
+            $message->conversation->uuid,
+        );
+
+        abort_if($conversation->id !== $message->conversation_id, 404);
+
+        $updated = $this->reactions->react($me, $message, $request->emoji());
+
+        MessageReacted::dispatch($updated);
+
+        return $this->ok(
+            $this->chat->presentMessage(
+                $updated->loadMissing(['sender:id,uuid', 'attachment', 'replyTo.sender:id,uuid']),
+            ),
+            'OK',
+        );
     }
 
     private function findMessage(string $uuid): Message

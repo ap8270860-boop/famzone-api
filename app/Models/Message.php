@@ -92,6 +92,14 @@ class Message extends Model
     }
 
     /**
+     * @return HasMany<MessageReaction>
+     */
+    public function reactions(): HasMany
+    {
+        return $this->hasMany(MessageReaction::class);
+    }
+
+    /**
      * @return \Illuminate\Database\Eloquent\Relations\HasOne<MessageAttachment>
      */
     public function attachment(): \Illuminate\Database\Eloquent\Relations\HasOne

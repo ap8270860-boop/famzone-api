@@ -81,6 +81,7 @@ class MessageSent implements ShouldBroadcast
                 'sender:id,uuid',
                 'attachment',
                 'replyTo.sender:id,uuid',
+                'reactions.user:id,uuid',
             ]),
         );
     }
