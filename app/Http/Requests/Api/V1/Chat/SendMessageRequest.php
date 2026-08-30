@@ -55,6 +55,14 @@ class SendMessageRequest extends FormRequest
                 'nullable', 'string', 'max:'.Message::BODY_MAX,
             ],
 
+            /*
+             | The message being answered. Its public id, and it must belong
+             | to this same conversation — the service checks that, because a
+             | reply pointing into somebody else's thread would leak a line of
+             | it into this one.
+             */
+            'reply_to_id' => ['sometimes', 'nullable', 'uuid'],
+
             // The id returned by POST /uploads. Required for every type but
             // text — the service checks it belongs to the sender and has not
             // already been used.
@@ -91,7 +99,7 @@ class SendMessageRequest extends FormRequest
     }
 
     /**
-     * @return array{client_uuid: string, type: string, body: ?string, upload_id: ?string}
+     * @return array{client_uuid: string, type: string, body: ?string, upload_id: ?string, reply_to_id: ?string}
      */
     public function payload(): array
     {
@@ -100,6 +108,7 @@ class SendMessageRequest extends FormRequest
             'type' => (string) $this->input('type'),
             'body' => $this->input('body'),
             'upload_id' => $this->input('upload_id'),
+            'reply_to_id' => $this->input('reply_to_id'),
         ];
     }
 }

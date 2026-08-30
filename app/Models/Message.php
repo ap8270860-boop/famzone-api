@@ -78,6 +78,20 @@ class Message extends Model
     }
 
     /**
+     * The message this one is answering, if any.
+     *
+     * withTrashed on purpose: a reply must outlive what it replied to. The
+     * quote becomes a tombstone rather than vanishing, because a reply with
+     * nothing above it reads as a non-sequitur.
+     *
+     * @return BelongsTo<Message, Message>
+     */
+    public function replyTo(): BelongsTo
+    {
+        return $this->belongsTo(Message::class, 'reply_to_id')->withTrashed();
+    }
+
+    /**
      * @return \Illuminate\Database\Eloquent\Relations\HasOne<MessageAttachment>
      */
     public function attachment(): \Illuminate\Database\Eloquent\Relations\HasOne

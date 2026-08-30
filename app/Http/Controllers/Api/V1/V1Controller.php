@@ -1347,9 +1347,11 @@ class V1Controller extends Controller
 
     private function findMessage(string $uuid): Message
     {
-        $message = Message::with(['sender:id,uuid', 'attachment'])
-            ->where('uuid', $uuid)
-            ->first();
+        $message = Message::with([
+            'sender:id,uuid',
+            'attachment',
+            'replyTo.sender:id,uuid',
+        ])->where('uuid', $uuid)->first();
 
         abort_if($message === null, 404, 'That message does not exist.');
 

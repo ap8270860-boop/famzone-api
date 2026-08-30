@@ -15,6 +15,7 @@ use App\Services\Social\RelationshipService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 /**
  * Conversations and messages.
@@ -377,7 +378,11 @@ class ChatService
 
         $query = $conversation->messages()
             ->withTrashed()
-            ->with(['sender:id,uuid', 'attachment']);
+            ->with([
+                'sender:id,uuid',
+                'attachment',
+                'replyTo.sender:id,uuid',
+            ]);
 
         if ($after !== null) {
             $messages = (clone $query)->where('seq', '>', $after)
@@ -535,6 +540,29 @@ class ChatService
         $message->conversation_id = $conversation->id;
         $message->sender_id = $sender->id;
         $message->seq = $seq;
+
+        /*
+         | Resolve the message being replied to, scoped to this conversation.
+         |
+         | The scope is the security check, not a convenience: without it a
+         | crafted reply_to_id would quote a line out of a thread the sender
+         | has no access to, and the quote is rendered verbatim on both
+         | screens.
+         |
+         | withTrashed, because replying to something that was then deleted is
+         | ordinary and the reply should still stand.
+         */
+        if (filled($payload['reply_to_id'] ?? null)) {
+            $parent = Message::withTrashed()
+                ->where('conversation_id', $conversation->id)
+                ->where('uuid', $payload['reply_to_id'])
+                ->first();
+
+            abort_if($parent === null, 422, 'That message is not in this conversation.');
+
+            $message->reply_to_id = $parent->id;
+        }
+
         $message->save();
 
         /*
@@ -634,8 +662,38 @@ class ChatService
                 ? null
                 : $this->attachments->present($message->attachment),
 
+            'reply_to' => $this->presentQuote($message->replyTo),
+
             'edited_at' => $message->edited_at?->toIso8601String(),
             'created_at' => $message->created_at->toIso8601String(),
+        ];
+    }
+
+    /**
+     * A one-line version of a quoted message.
+     *
+     * Deliberately not the full DTO. A quote needs enough to recognise the
+     * message and nothing more, and nesting whole messages inside messages
+     * would let one deep reply chain drag half a conversation onto the wire.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function presentQuote(?Message $quoted): ?array
+    {
+        if ($quoted === null) {
+            return null;
+        }
+
+        $gone = $quoted->trashed();
+
+        return [
+            'id' => $quoted->uuid,
+            'sender_id' => $quoted->sender?->uuid,
+            'type' => $gone ? Message::TYPE_TEXT : $quoted->type,
+            // Truncated: a quote is a pointer, and a 4000-character one would
+            // bury the reply underneath it.
+            'body' => $gone ? null : Str::limit((string) $quoted->body, 140),
+            'deleted' => $gone,
         ];
     }
 
@@ -771,7 +829,7 @@ class ChatService
     private function findByClientUuid(Conversation $conversation, string $clientUuid): ?Message
     {
         return Message::withTrashed()
-            ->with(['sender:id,uuid', 'attachment'])
+            ->with(['sender:id,uuid', 'attachment', 'replyTo.sender:id,uuid'])
             ->where('conversation_id', $conversation->id)
             ->where('client_uuid', $clientUuid)
             ->first();
