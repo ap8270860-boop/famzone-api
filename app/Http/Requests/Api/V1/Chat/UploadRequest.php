@@ -5,6 +5,7 @@ namespace App\Http\Requests\Api\V1\Chat;
 use App\Models\Message;
 use App\Services\Chat\AttachmentService;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Validation\Rule;
 
 /**
@@ -15,6 +16,33 @@ use Illuminate\Validation\Rule;
  */
 class UploadRequest extends FormRequest
 {
+    /**
+     * What a voice note is allowed to be.
+     *
+     * The point of this list is to catch a codec mistake, not an attacker: a
+     * voice note has to be AAC in an MP4 container, because that is the one
+     * encoding both platforms record *and* play. Opus in CAF (iOS) and Opus
+     * in Ogg (Android) are both silence on the other platform, and both are
+     * still refused here.
+     *
+     * video/mp4 is in the list on purpose. finfo identifies the container,
+     * and an m4a *is* an MP4 container — it usually cannot tell that the only
+     * track inside is audio. Leaving it out rejected every voice note the app
+     * recorded.
+     *
+     * @var array<int, string>
+     */
+    public const AUDIO_MIMES = [
+        'audio/mp4',
+        'audio/x-m4a',
+        'audio/m4a',
+        'audio/aac',
+        'audio/aacp',
+        'audio/mpeg',
+        'application/mp4',
+        'video/mp4',
+    ];
+
     public function authorize(): bool
     {
         return true;
@@ -98,7 +126,18 @@ class UploadRequest extends FormRequest
                  | shows up on the first upload rather than on somebody
                  | else's phone.
                  */
-                $audio ? 'mimetypes:audio/mp4,audio/x-m4a,audio/aac,audio/mpeg' : null,
+                $audio ? static function (string $attribute, $value, callable $fail): void {
+                    $mime = $value instanceof UploadedFile
+                        ? (string) $value->getMimeType()
+                        : '';
+
+                    if (! in_array($mime, self::AUDIO_MIMES, true)) {
+                        // Naming the type it actually saw, because "not
+                        // supported" with no detail is a bug report nobody
+                        // can act on.
+                        $fail("That audio format is not supported ({$mime}).");
+                    }
+                } : null,
 
                 'max:'.($image
                     ? AttachmentService::MAX_IMAGE_KB
@@ -129,7 +168,6 @@ class UploadRequest extends FormRequest
         return [
             'file.max' => 'That file is too large to send.',
             'file.image' => 'That does not look like an image.',
-            'file.mimetypes' => 'That audio format is not supported.',
         ];
     }
 }
