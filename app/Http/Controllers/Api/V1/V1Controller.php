@@ -1329,6 +1329,8 @@ class V1Controller extends Controller
             $request->user(),
             $request->file('file'),
             (string) $request->input('type'),
+            $request->durationMs(),
+            $request->waveform(),
         );
 
         return $this->created(

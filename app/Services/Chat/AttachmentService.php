@@ -40,8 +40,16 @@ class AttachmentService
     /**
      * Store a file and record it, unattached.
      */
-    public function upload(User $uploader, UploadedFile $file, string $type): MessageAttachment
-    {
+    /**
+     * @param  array<int, int>|null  $waveform
+     */
+    public function upload(
+        User $uploader,
+        UploadedFile $file,
+        string $type,
+        ?int $durationMs = null,
+        ?array $waveform = null,
+    ): MessageAttachment {
         $disk = Storage::disk(config('filesystems.default'));
 
         /*
@@ -67,6 +75,16 @@ class AttachmentService
             'size_bytes' => $file->getSize(),
             'width' => $width,
             'height' => $height,
+
+            /*
+             | Voice notes only, and measured on the device that recorded it.
+             |
+             | Deriving either of these here would mean decoding the audio on
+             | the web server — expensive, and pointless when the recorder
+             | already had every sample in its hands.
+             */
+            'duration_ms' => $durationMs,
+            'waveform' => $waveform,
         ]);
 
         $attachment->user_id = $uploader->id;
