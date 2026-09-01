@@ -10,6 +10,7 @@ use App\Models\ConversationParticipant;
 use App\Models\Follow;
 use App\Models\Message;
 use App\Models\MessageAttachment;
+use App\Models\MessageHide;
 use App\Models\User;
 use App\Services\Social\RelationshipService;
 use Illuminate\Database\Eloquent\Builder;
@@ -35,6 +36,15 @@ class ChatService
 {
     /** Scrollback page size. */
     public const PER_PAGE = 40;
+
+    /**
+     * Hidden-message answers already fetched this request, keyed
+     * `userId:messageId`. A hide is permanent, so nothing here can go
+     * stale within the life of one request.
+     *
+     * @var array<string, bool>
+     */
+    private array $hidden = [];
 
     /** Inbox page size. */
     public const INBOX_PER_PAGE = 25;
@@ -273,6 +283,11 @@ class ChatService
             ->forPage($page, $perPage)
             ->get();
 
+        // One query for the whole page: which of these last messages the
+        // viewer has deleted for themselves. Without it every row would ask
+        // on its own, and twenty rows would be twenty queries for a boolean.
+        $this->warmHidden($me, $conversations->pluck('last_message_id')->all());
+
         return [
             'total' => $total,
             'page' => $page,
@@ -380,6 +395,14 @@ class ChatService
 
         $query = $conversation->messages()
             ->withTrashed()
+            /*
+             | Deleted for me.
+             |
+             | Filtered in the query, not after it: a page is forty rows, and
+             | dropping hidden ones afterwards would hand back short pages
+             | that get shorter the more somebody has deleted.
+             */
+            ->whereNotIn('id', MessageHide::idsFor($me->id))
             ->with([
                 'sender:id,uuid',
                 'attachment',
@@ -719,6 +742,68 @@ class ChatService
     }
 
     /**
+     * Which of these messages the viewer has deleted for themselves.
+     *
+     * Public so the inbox can fill the cache for a whole page in one query
+     * before it presents any row.
+     *
+     * @param  array<int, int|null>  $messageIds
+     */
+    public function warmHidden(User $me, array $messageIds): void
+    {
+        $ids = array_values(array_unique(array_filter($messageIds)));
+
+        if ($ids === []) {
+            return;
+        }
+
+        $hidden = MessageHide::where('user_id', $me->id)
+            ->whereIn('message_id', $ids)
+            ->pluck('message_id')
+            ->all();
+
+        foreach ($ids as $id) {
+            $this->hidden[$me->id.':'.$id] = in_array($id, $hidden, true);
+        }
+    }
+
+    private function hasHidden(User $me, int $messageId): bool
+    {
+        $key = $me->id.':'.$messageId;
+
+        if (! array_key_exists($key, $this->hidden)) {
+            $this->warmHidden($me, [$messageId]);
+        }
+
+        return $this->hidden[$key] ?? false;
+    }
+
+    /**
+     * The newest message in this thread the viewer has not hidden.
+     *
+     * Almost always the conversation's own last message, with no query at
+     * all. It only reaches for the database when that message is one this
+     * person deleted for themselves — rare, and the alternative is an inbox
+     * row previewing a message you just deleted, which is the kind of bug
+     * people screenshot.
+     */
+    private function visibleLastMessage(User $me, Conversation $conversation): ?Message
+    {
+        $last = $conversation->lastMessage;
+
+        if ($last === null || ! $this->hasHidden($me, $last->id)) {
+            return $last;
+        }
+
+        return $conversation->messages()
+            ->withTrashed()
+            ->whereNotIn('id', MessageHide::idsFor($me->id))
+            ->with(['sender:id,uuid', 'attachment'])
+            ->orderByDesc('seq')
+            ->first();
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function presentConversation(User $me, Conversation $conversation): array
@@ -728,16 +813,20 @@ class ChatService
             fn (ConversationParticipant $p) => $p->user_id !== $me->id,
         );
 
+        $last = $this->visibleLastMessage($me, $conversation);
+
         return [
             'id' => $conversation->uuid,
             'type' => $conversation->type,
             'state' => $mine?->state ?? ConversationParticipant::STATE_ACCEPTED,
             'unread_count' => (int) ($mine?->unread_count ?? 0),
             'muted' => (bool) $mine?->isMuted(),
-            'last_message_at' => $conversation->last_message_at?->toIso8601String(),
-            'last_message' => $conversation->lastMessage
-                ? $this->presentMessage($conversation->lastMessage)
-                : null,
+            // Both read off the message actually being shown, so a row
+            // whose newest message is hidden reports the one it fell back to
+            // rather than a timestamp for something invisible.
+            'last_message_at' => ($last?->created_at ?? $conversation->last_message_at)
+                ?->toIso8601String(),
+            'last_message' => $last === null ? null : $this->presentMessage($last),
 
             /*
              | Whether a wall stands between these two, in either direction.

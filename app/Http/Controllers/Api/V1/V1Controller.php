@@ -1391,6 +1391,26 @@ class V1Controller extends Controller
     }
 
     /**
+     * POST /api/v1/messages/{uuid}/hide
+     *
+     * Delete for me. Works on anybody's message, unlike delete for everyone
+     * — removing something from your own screen needs no permission from the
+     * person who wrote it.
+     */
+    public function hideMessage(Request $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+        $message = $this->findMessage($uuid);
+
+        // Membership check — a message id alone must not be enough.
+        $this->chat->findConversation($me, $message->conversation->uuid);
+
+        $this->messageActions->hideForMe($me, $message);
+
+        return $this->ok(null, 'Deleted for you.');
+    }
+
+    /**
      * POST /api/v1/messages/{uuid}/star
      *
      * Toggles. Private to the caller: nothing is broadcast, and the other

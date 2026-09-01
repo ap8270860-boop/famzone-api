@@ -5,6 +5,7 @@ namespace App\Services\Chat;
 use App\Models\Conversation;
 use App\Models\Message;
 use App\Models\MessageAttachment;
+use App\Models\MessageHide;
 use App\Models\MessageStar;
 use App\Models\User;
 use Illuminate\Database\QueryException;
@@ -69,6 +70,36 @@ class MessageActionService
     }
 
     /**
+     * Delete for me.
+     *
+     * The message is untouched: it stays in the thread for everybody else,
+     * because one reader wanting it off their own screen says nothing about
+     * anyone else's copy. That is the entire difference between this and
+     * delete for everyone, and it is why this is a row of its own rather
+     * than a flag on the message.
+     *
+     * Nothing is broadcast. The other person must not be able to tell.
+     */
+    public function hideForMe(User $user, Message $message): void
+    {
+        try {
+            $hide = new MessageHide();
+
+            $hide->message_id = $message->id;
+            $hide->user_id = $user->id;
+            $hide->created_at = now();
+            $hide->save();
+        } catch (QueryException $e) {
+            // Already hidden. Two taps in flight, or a retry after a timeout
+            // — either way the message is gone from their screen, which is
+            // what they asked for.
+            if (($e->errorInfo[1] ?? null) !== 1062) {
+                throw $e;
+            }
+        }
+    }
+
+    /**
      * Which of these messages this person has starred.
      *
      * Fetched as a set for a whole page rather than per message: a scrollback
@@ -103,6 +134,13 @@ class MessageActionService
 
         $query = Message::query()
             ->whereIn('id', MessageStar::where('user_id', $user->id)->select('message_id'))
+            /*
+             | Not the ones they deleted for themselves.
+             |
+             | Otherwise Starred becomes a way to keep reading a message you
+             | deliberately removed from the thread.
+             */
+            ->whereNotIn('id', MessageHide::idsFor($user->id))
             /*
              | Only from threads they are still in.
              |

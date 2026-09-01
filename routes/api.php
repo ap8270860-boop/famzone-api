@@ -260,6 +260,14 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
         Route::get('starred-messages', [V1Controller::class, 'starredMessages'])
             ->name('messages.starred');
 
+        /*
+         | Delete for me. Private to the caller, nothing broadcast — the other
+         | person keeps their copy and cannot tell.
+         */
+        Route::post('messages/{uuid}/hide', [V1Controller::class, 'hideMessage'])
+            ->middleware('throttle:120,1')
+            ->name('messages.hide');
+
         Route::post('messages/{uuid}/star', [V1Controller::class, 'starMessage'])
             ->middleware('throttle:120,1')
             ->name('messages.star');
