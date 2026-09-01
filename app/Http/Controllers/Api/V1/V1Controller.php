@@ -37,6 +37,7 @@ use App\Services\Chat\MessageActionService;
 use App\Services\Chat\PresenceService;
 use App\Services\Chat\ReactionService;
 use App\Services\Chat\ReceiptService;
+use App\Services\Chat\ThreadSettingsService;
 use App\Services\Otp\Exceptions\OtpException;
 use App\Services\Otp\OtpService;
 use App\Services\Posts\PostService;
@@ -81,6 +82,7 @@ class V1Controller extends Controller
         private readonly AttachmentService $attachments,
         private readonly ReactionService $reactions,
         private readonly MessageActionService $messageActions,
+        private readonly ThreadSettingsService $threads,
     ) {
     }
 
@@ -1388,6 +1390,91 @@ class V1Controller extends Controller
             ),
             'OK',
         );
+    }
+
+    /**
+     * POST /api/v1/conversations/{uuid}/pin-chat
+     *
+     * Pin the thread to the top of my own inbox. Toggles, and is invisible
+     * to the other person — this is not the shared pinned message.
+     */
+    public function pinConversation(Request $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+
+        $pinned = $this->threads->togglePin(
+            $me,
+            $this->chat->findConversation($me, $uuid),
+        );
+
+        return $this->ok(
+            ['pinned' => $pinned],
+            $pinned ? 'Pinned to top.' : 'Unpinned.',
+        );
+    }
+
+    /**
+     * POST /api/v1/conversations/{uuid}/mute   {muted, hours?}
+     *
+     * Notifications only. Messages still arrive and the thread still counts
+     * as unread; muting is about whether the phone makes a noise.
+     */
+    public function muteConversation(Request $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+        $conversation = $this->chat->findConversation($me, $uuid);
+
+        $muted = $request->boolean('muted', true);
+        $hours = $request->input('hours');
+
+        $until = $this->threads->mute(
+            $me,
+            $conversation,
+            $muted,
+            is_numeric($hours) ? (int) $hours : null,
+        );
+
+        return $this->ok(
+            ['muted' => $muted, 'muted_until' => $until?->toIso8601String()],
+            $muted ? 'Muted.' : 'Unmuted.',
+        );
+    }
+
+    /**
+     * POST /api/v1/conversations/{uuid}/unread
+     *
+     * Make it look unread again. A flag of my own — the read watermark does
+     * not move, so their ticks stay exactly as they were.
+     */
+    public function markConversationUnread(Request $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+
+        $this->threads->markUnread(
+            $me,
+            $this->chat->findConversation($me, $uuid),
+        );
+
+        return $this->ok(['marked_unread' => true], 'Marked as unread.');
+    }
+
+    /**
+     * POST /api/v1/conversations/{uuid}/clear
+     *
+     * Empty the thread on my side. Every message hidden for me, exactly as
+     * if I had deleted each one for myself; the thread itself stays in the
+     * list and the other person keeps everything.
+     */
+    public function clearConversation(Request $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+
+        $this->threads->clear(
+            $me,
+            $this->chat->findConversation($me, $uuid),
+        );
+
+        return $this->ok(null, 'Chat cleared.');
     }
 
     /**

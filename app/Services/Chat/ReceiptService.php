@@ -102,6 +102,11 @@ class ReceiptService
                     ->where('sender_id', '!=', $me->id)
                     ->where('seq', '>', $message->seq)
                     ->count();
+
+                // Actually reading the thread undoes "mark as unread". Same
+                // write, so the flag cannot survive a read by being cleared
+                // in a second query that fails.
+                $changes['marked_unread'] = false;
             }
 
             $participant->forceFill($changes)->save();

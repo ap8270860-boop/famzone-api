@@ -268,6 +268,22 @@ class ChatService
             ->whereDoesntHave('participants', fn (Builder $q) => $q
                 ->where('user_id', '!=', $me->id)
                 ->whereIn('user_id', Block::wallIds($me->id)))
+            /*
+             | Pinned chats first.
+             |
+             | Ordered by a correlated subquery against this person's own
+             | participant row, because a pin belongs to one reader: it
+             | cannot be a column on the conversation, and a plain join would
+             | bring the other participant's row along with it.
+             |
+             | MySQL sorts NULLs last on a descending order, so every
+             | unpinned thread falls in behind every pinned one for free.
+             */
+            ->orderByDesc(ConversationParticipant::query()
+                ->select('pinned_at')
+                ->whereColumn('conversation_id', 'conversations.id')
+                ->where('user_id', $me->id)
+                ->limit(1))
             ->orderByDesc('last_message_at')
             ->orderByDesc('id');
 
@@ -313,7 +329,17 @@ class ChatService
         $rows = ConversationParticipant::query()
             ->where('user_id', $me->id)
             ->whereNull('left_at')
-            ->selectRaw('state, SUM(unread_count) as unread, COUNT(*) as threads')
+            /*
+             | A thread somebody marked unread counts as one.
+             |
+             | Otherwise the row shows a dot the app badge does not
+             | know about, and the two disagree on the home screen.
+             */
+            ->selectRaw(
+                'state, SUM(CASE WHEN unread_count > 0 THEN unread_count'
+                .' WHEN marked_unread = 1 THEN 1 ELSE 0 END) as unread,'
+                .' COUNT(*) as threads'
+            )
             ->groupBy('state')
             ->get()
             ->keyBy('state');
@@ -821,6 +847,17 @@ class ChatService
             'state' => $mine?->state ?? ConversationParticipant::STATE_ACCEPTED,
             'unread_count' => (int) ($mine?->unread_count ?? 0),
             'muted' => (bool) $mine?->isMuted(),
+            'muted_until' => $mine?->muted_until?->toIso8601String(),
+
+            /*
+             | Mine alone, both of them.
+             |
+             | Pinning a chat to the top of my list says nothing about
+             | where it sits in theirs — unlike a pinned message,
+             | which is shared and lives on the conversation.
+             */
+            'pinned' => $mine?->pinned_at !== null,
+            'marked_unread' => (bool) ($mine?->marked_unread ?? false),
             // Both read off the message actually being shown, so a row
             // whose newest message is hidden reports the one it fell back to
             // rather than a timestamp for something invisible.
@@ -843,8 +880,14 @@ class ChatService
             'blocked' => $other !== null
                 && isset($this->wall($me)[$other->user_id]),
 
-            // Shared by both people, unlike a star.
+            /*
+             | Shared by both people, unlike a star — but still not shown to
+             | somebody who deleted or cleared that message on their own
+             | side. A banner quoting a message you deliberately removed is
+             | worse than no banner at all.
+             */
             'pinned_message' => $conversation->pinnedMessage === null
+                || $this->hasHidden($me, $conversation->pinnedMessage->id)
                 ? null
                 : $this->presentMessage($conversation->pinnedMessage),
 

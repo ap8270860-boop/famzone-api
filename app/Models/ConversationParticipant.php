@@ -36,7 +36,9 @@ class ConversationParticipant extends Model
             'last_read_seq' => 'integer',
             'last_delivered_seq' => 'integer',
             'unread_count' => 'integer',
+            'marked_unread' => 'boolean',
             'muted_until' => 'datetime',
+            'pinned_at' => 'datetime',
             'joined_at' => 'datetime',
             'left_at' => 'datetime',
         ];
@@ -71,6 +73,11 @@ class ConversationParticipant extends Model
     public function isMuted(): bool
     {
         return $this->muted_until !== null && $this->muted_until->isFuture();
+    }
+
+    public function isPinned(): bool
+    {
+        return $this->pinned_at !== null;
     }
 
     /**

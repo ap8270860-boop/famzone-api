@@ -242,6 +242,31 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
             Route::post('pin', [V1Controller::class, 'pinMessage'])
                 ->middleware('throttle:60,1')
                 ->name('pin');
+
+            /*
+             | This person's own view of the thread.
+             |
+             | Nothing here is broadcast and nothing is visible to the other
+             | person: each one writes a column on the caller's participant
+             | row. `pin-chat` is deliberately not `pin` — that one is the
+             | shared pinned message, which is a different thing entirely.
+             */
+            Route::post('pin-chat', [V1Controller::class, 'pinConversation'])
+                ->middleware('throttle:60,1')
+                ->name('pin_chat');
+
+            Route::post('mute', [V1Controller::class, 'muteConversation'])
+                ->middleware('throttle:60,1')
+                ->name('mute');
+
+            Route::post('unread', [V1Controller::class, 'markConversationUnread'])
+                ->middleware('throttle:60,1')
+                ->name('unread');
+
+            // Tighter: emptying a long thread writes a row per message.
+            Route::post('clear', [V1Controller::class, 'clearConversation'])
+                ->middleware('throttle:20,1')
+                ->name('clear');
         });
 
         Route::delete('messages/{uuid}', [V1Controller::class, 'deleteMessage'])
