@@ -255,6 +255,10 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
                 ->middleware('throttle:60,1')
                 ->name('pin_chat');
 
+            Route::post('archive', [V1Controller::class, 'archiveConversation'])
+                ->middleware('throttle:60,1')
+                ->name('archive');
+
             Route::post('mute', [V1Controller::class, 'muteConversation'])
                 ->middleware('throttle:60,1')
                 ->name('mute');

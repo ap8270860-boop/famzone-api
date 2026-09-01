@@ -55,6 +55,40 @@ class ThreadSettingsService
     }
 
     /**
+     * Put the thread away, or bring it back.
+     *
+     * Archiving is not deleting and not muting: the thread keeps every
+     * message, keeps notifying, and comes back the moment this person opens
+     * it. It is only about which list it appears in.
+     *
+     * A new message does *not* pull it out again, deliberately. Somebody who
+     * archived a chat has said where they want it; a thread that unarchives
+     * itself the moment it is used is a setting that undoes itself.
+     */
+    public function toggleArchive(User $me, Conversation $conversation): bool
+    {
+        $participant = $this->chat->participantOrFail($conversation, $me);
+
+        $archived = $participant->archived_at === null;
+
+        $participant->forceFill([
+            'archived_at' => $archived ? now() : null,
+
+            /*
+             | Putting a chat away un-pins it.
+             |
+             | The two are contradictory instructions — one says hold this at
+             | the top of my list, the other says take it out of my list —
+             | and honouring both would mean a pinned chat sitting at the top
+             | of the Archived screen for no reason anybody could explain.
+             */
+            'pinned_at' => $archived ? null : $participant->pinned_at,
+        ])->save();
+
+        return $archived;
+    }
+
+    /**
      * Silence the thread, or let it speak again.
      *
      * [$hours] of null means indefinitely. Muting is about notifications

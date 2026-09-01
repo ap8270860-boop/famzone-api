@@ -1110,6 +1110,9 @@ class V1Controller extends Controller
                 $state,
                 max(1, (int) $request->integer('page', 1)),
                 (int) $request->integer('per_page', ChatService::INBOX_PER_PAGE),
+                // The same list, filtered the other way. Archived threads
+                // are excluded from the ordinary inbox by default.
+                $request->boolean('archived'),
             ),
             'OK',
         );
@@ -1410,6 +1413,28 @@ class V1Controller extends Controller
         return $this->ok(
             ['pinned' => $pinned],
             $pinned ? 'Pinned to top.' : 'Unpinned.',
+        );
+    }
+
+    /**
+     * POST /api/v1/conversations/{uuid}/archive
+     *
+     * Put the thread away, or bring it back. Toggles, and is invisible to
+     * the other person — archiving is about which of my lists it appears in,
+     * nothing more.
+     */
+    public function archiveConversation(Request $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+
+        $archived = $this->threads->toggleArchive(
+            $me,
+            $this->chat->findConversation($me, $uuid),
+        );
+
+        return $this->ok(
+            ['archived' => $archived],
+            $archived ? 'Archived.' : 'Moved back to your chats.',
         );
     }
 

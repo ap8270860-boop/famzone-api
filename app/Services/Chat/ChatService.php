@@ -250,6 +250,7 @@ class ChatService
         string $state = ConversationParticipant::STATE_ACCEPTED,
         int $page = 1,
         int $perPage = self::INBOX_PER_PAGE,
+        bool $archived = false,
     ): array {
         $perPage = max(1, min(50, $perPage));
 
@@ -258,7 +259,20 @@ class ChatService
                 ->select('conversation_id')
                 ->where('user_id', $me->id)
                 ->where('state', $state)
-                ->whereNull('left_at'))
+                ->whereNull('left_at')
+                /*
+                 | Archived threads are not gone, they are elsewhere.
+                 |
+                 | The same endpoint serves both lists rather than a second
+                 | one that would duplicate the blocking rule, the
+                 | never-written-in rule, the eager loads and the ordering —
+                 | four things that must not be allowed to drift apart.
+                 */
+                ->when(
+                    $archived,
+                    fn (Builder $q) => $q->whereNotNull('archived_at'),
+                    fn (Builder $q) => $q->whereNull('archived_at'),
+                ))
             // A thread opened by tapping Message but never written in is not
             // yet a conversation. It exists so the composer has somewhere to
             // put a draft; it has no business in either person's list until
@@ -330,6 +344,14 @@ class ChatService
             ->where('user_id', $me->id)
             ->whereNull('left_at')
             /*
+             | Archived threads are deliberately outside the badge.
+             |
+             | Putting a chat away is a statement that it should stop asking
+             | for attention; a number on the home screen it still feeds
+             | would make the gesture pointless.
+             */
+            ->whereNull('archived_at')
+            /*
              | A thread somebody marked unread counts as one.
              |
              | Otherwise the row shows a dot the app badge does not
@@ -350,10 +372,21 @@ class ChatService
         $accepted = $rows->get(ConversationParticipant::STATE_ACCEPTED);
         $pending = $rows->get(ConversationParticipant::STATE_PENDING);
 
+        // One extra count, for the Archived row at the top of the inbox.
+        // It shows how many are in there, not how many are unread — see
+        // above for why archived threads do not carry an unread number.
+        $archived = ConversationParticipant::query()
+            ->where('user_id', $me->id)
+            ->whereNull('left_at')
+            ->where('state', ConversationParticipant::STATE_ACCEPTED)
+            ->whereNotNull('archived_at')
+            ->count();
+
         return [
             'unread' => (int) ($accepted->unread ?? 0),
             'threads' => (int) ($accepted->threads ?? 0),
             'requests' => (int) ($pending->threads ?? 0),
+            'archived' => $archived,
         ];
     }
 
@@ -857,6 +890,7 @@ class ChatService
              | which is shared and lives on the conversation.
              */
             'pinned' => $mine?->pinned_at !== null,
+            'archived' => $mine?->archived_at !== null,
             'marked_unread' => (bool) ($mine?->marked_unread ?? false),
             // Both read off the message actually being shown, so a row
             // whose newest message is hidden reports the one it fell back to

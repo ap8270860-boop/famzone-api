@@ -39,6 +39,7 @@ class ConversationParticipant extends Model
             'marked_unread' => 'boolean',
             'muted_until' => 'datetime',
             'pinned_at' => 'datetime',
+            'archived_at' => 'datetime',
             'joined_at' => 'datetime',
             'left_at' => 'datetime',
         ];
@@ -78,6 +79,11 @@ class ConversationParticipant extends Model
     public function isPinned(): bool
     {
         return $this->pinned_at !== null;
+    }
+
+    public function isArchived(): bool
+    {
+        return $this->archived_at !== null;
     }
 
     /**
