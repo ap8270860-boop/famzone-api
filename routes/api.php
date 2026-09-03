@@ -293,6 +293,16 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
          | Delete for me. Private to the caller, nothing broadcast — the other
          | person keeps their copy and cannot tell.
          */
+        /*
+         | Message info. Your own messages only — see ReceiptService::info.
+         |
+         | Before messages/{uuid}/hide only for readability; the segments do
+         | not collide.
+         */
+        Route::get('messages/{uuid}/info', [V1Controller::class, 'messageInfo'])
+            ->middleware('throttle:120,1')
+            ->name('messages.info');
+
         Route::post('messages/{uuid}/hide', [V1Controller::class, 'hideMessage'])
             ->middleware('throttle:120,1')
             ->name('messages.hide');

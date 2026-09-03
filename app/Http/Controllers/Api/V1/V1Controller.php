@@ -1505,6 +1505,23 @@ class V1Controller extends Controller
     }
 
     /**
+     * GET /api/v1/messages/{uuid}/info
+     *
+     * When it reached them, and when they read it. Only for messages you
+     * wrote yourself.
+     */
+    public function messageInfo(Request $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+        $message = $this->findMessage($uuid);
+
+        // Membership check — a message id alone must not be enough.
+        $conversation = $this->chat->findConversation($me, $message->conversation->uuid);
+
+        return $this->ok($this->receipts->info($me, $conversation, $message), 'OK');
+    }
+
+    /**
      * POST /api/v1/messages/{uuid}/hide
      *
      * Delete for me. Works on anybody's message, unlike delete for everyone
