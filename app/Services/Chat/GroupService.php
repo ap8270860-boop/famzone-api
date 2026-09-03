@@ -67,11 +67,7 @@ class GroupService
             ? $this->familyIds($me)
             : $this->connectionIds($me);
 
-        // A wall in either direction takes somebody off the list. Being able
-        // to add a person you blocked into a room with you is not a feature.
-        $walled = Block::wallIds($me->id);
-
-        $ids = array_values(array_diff($ids, $walled, [$me->id]));
+        $ids = array_values(array_diff($ids, [$me->id]));
 
         if ($ids === []) {
             return new Collection();
@@ -79,6 +75,15 @@ class GroupService
 
         return User::query()
             ->whereIn('id', $ids)
+            /*
+             | A wall in either direction takes somebody off the list. Being
+             | able to add a person you blocked into a room with you is not a
+             | feature.
+             |
+             | wallIds() is a subquery rather than a list of ids, so it goes
+             | to the database here instead of into array_diff.
+             */
+            ->whereNotIn('id', Block::wallIds($me->id))
             ->where('status', 'active')
             ->orderBy('name')
             ->get();
