@@ -273,6 +273,21 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
                 ->middleware('throttle:60,1')
                 ->name('pin_chat');
 
+            /*
+             | Group housekeeping.
+             |
+             | Renaming and the photo are open to any member; removing a
+             | person is admin-only, and the service enforces that rather
+             | than the route.
+             */
+            Route::post('group', [V1Controller::class, 'updateGroup'])
+                ->middleware('throttle:30,1')
+                ->name('group.update');
+
+            Route::delete('members/{member}', [V1Controller::class, 'removeGroupMember'])
+                ->middleware('throttle:60,1')
+                ->name('group.members.destroy');
+
             Route::post('archive', [V1Controller::class, 'archiveConversation'])
                 ->middleware('throttle:60,1')
                 ->name('archive');

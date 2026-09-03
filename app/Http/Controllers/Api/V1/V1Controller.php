@@ -10,6 +10,7 @@ use App\Http\Requests\Api\V1\Auth\RegisterRequest;
 use App\Http\Requests\Api\V1\Auth\SendOtpRequest;
 use App\Http\Requests\Api\V1\Auth\VerifyOtpRequest;
 use App\Http\Requests\Api\V1\Chat\CreateGroupRequest;
+use App\Http\Requests\Api\V1\Chat\UpdateGroupRequest;
 use App\Http\Requests\Api\V1\Chat\ForwardRequest;
 use App\Http\Requests\Api\V1\Chat\PinRequest;
 use App\Http\Requests\Api\V1\Chat\ReactRequest;
@@ -1165,6 +1166,54 @@ class V1Controller extends Controller
             $this->chat->presentConversation($me, $conversation, withMembers: true),
             'Group created.',
         );
+    }
+
+    /**
+     * POST /api/v1/conversations/{uuid}/group   (multipart)
+     *
+     * {title?, avatar?}
+     *
+     * Any member, not only an admin: a group's name and face are how the
+     * room describes itself, and being the person who created it is not a
+     * rank.
+     */
+    public function updateGroup(UpdateGroupRequest $request, string $uuid): JsonResponse
+    {
+        $me = $request->user();
+
+        $conversation = $this->groups->update(
+            $me,
+            $this->chat->findConversation($me, $uuid),
+            $request->title(),
+            $request->file('avatar'),
+        );
+
+        return $this->ok(
+            $this->chat->presentConversation($me, $conversation, withMembers: true),
+            'Group updated.',
+        );
+    }
+
+    /**
+     * DELETE /api/v1/conversations/{uuid}/members/{member}
+     *
+     * Admins only. Removing somebody is done to them rather than to the
+     * room, which is where the line between this and renaming sits.
+     */
+    public function removeGroupMember(
+        Request $request,
+        string $uuid,
+        string $member,
+    ): JsonResponse {
+        $me = $request->user();
+
+        $this->groups->removeMember(
+            $me,
+            $this->chat->findConversation($me, $uuid),
+            $this->findUser($member),
+        );
+
+        return $this->ok(null, 'Removed from the group.');
     }
 
     /**

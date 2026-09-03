@@ -2,6 +2,7 @@
 
 namespace App\Services\Chat;
 
+use App\Events\Chat\ConversationClosed;
 use App\Models\Block;
 use App\Models\Conversation;
 use App\Models\ConversationParticipant;
@@ -255,6 +256,118 @@ class GroupService
         $participant->role = $role;
         $participant->joined_at = now();
         $participant->save();
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Changing one
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * Rename it, or give it a different picture.
+     *
+     * Any member, not only an admin. A group's name and face are how the room
+     * describes itself, and in a family group the person who happened to
+     * create it is rarely the person who notices the name is wrong.
+     * Membership is the check that matters; being first is not a rank.
+     */
+    public function update(
+        User $me,
+        Conversation $conversation,
+        ?string $title = null,
+        ?UploadedFile $avatar = null,
+    ): Conversation {
+        $participant = $this->chat->participantOrFail($conversation, $me);
+
+        abort_if($participant->hasLeft(), 403, 'You are no longer in this group.');
+
+        $changes = [];
+        $notes = [];
+        $previous = $conversation->avatar_path;
+
+        if ($title !== null && $title !== '' && $title !== $conversation->title) {
+            $changes['title'] = $title;
+            $notes[] = $me->name.' changed the group name to "'.$title.'"';
+        }
+
+        if ($avatar !== null) {
+            $changes['avatar_path'] = $this->storeAvatar($me, $avatar);
+            $notes[] = $me->name.' changed the group photo';
+        }
+
+        // Nothing actually changed — a save and two system messages saying so
+        // would be worse than doing nothing.
+        if ($changes === []) {
+            return $conversation;
+        }
+
+        $conversation->forceFill($changes)->save();
+
+        /*
+         | The old picture goes after the new one is committed, not before.
+         |
+         | The other order leaves a group with no photo whenever the write
+         | fails, and the bytes are the only copy.
+         */
+        if ($avatar !== null && filled($previous)) {
+            try {
+                Storage::disk(config('filesystems.default'))->delete($previous);
+            } catch (\Throwable) {
+                // A file that outlives its row is untidy, not broken.
+            }
+        }
+
+        foreach ($notes as $note) {
+            $this->systemMessage($conversation, $me, $note);
+        }
+
+        return $conversation->fresh(['participants.user']);
+    }
+
+    /**
+     * Take somebody out of the group.
+     *
+     * Admins only, unlike renaming. Removing a person is done *to* them
+     * rather than to the room, and that is the line: anybody may change what
+     * the group is called, only an admin may change who is in it.
+     */
+    public function removeMember(User $me, Conversation $conversation, User $target): void
+    {
+        $mine = $this->chat->participantOrFail($conversation, $me);
+
+        abort_unless(
+            $mine->isAdmin() && ! $mine->hasLeft(),
+            403,
+            'Only a group admin can remove people.',
+        );
+
+        // Leaving is a different act, with a different system message and a
+        // different meaning to everybody watching.
+        abort_if($target->id === $me->id, 422, 'Use Leave group instead.');
+
+        $theirs = $conversation->participants()
+            ->where('user_id', $target->id)
+            ->first();
+
+        abort_if(
+            $theirs === null || $theirs->left_at !== null,
+            404,
+            'They are not in this group.',
+        );
+
+        $theirs->forceFill(['left_at' => now()])->save();
+
+        $this->systemMessage($conversation, $me, $me->name.' removed '.$target->name);
+
+        /*
+         | And tell them to let go of the channel.
+         |
+         | The system message above only reaches people still in the room, so
+         | without this the person just removed keeps a live subscription to a
+         | conversation they are no longer part of until they next reload.
+         */
+        ConversationClosed::dispatch($conversation, $target);
     }
 
     /*
