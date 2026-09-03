@@ -46,6 +46,10 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
      | the signature in the query string is the credential, so the link works
      | inside a plain <img> tag.
      */
+    Route::get('media/group/{uuid}', [V1Controller::class, 'streamGroupAvatar'])
+        ->middleware('signed')
+        ->name('media.group');
+
     Route::get('media/chat/{uuid}', [V1Controller::class, 'streamAttachment'])
         ->middleware('signed')
         ->name('media.chat');
@@ -195,6 +199,20 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
         Route::post('conversations', [V1Controller::class, 'startConversation'])
             ->middleware('throttle:60,1')
             ->name('conversations.store');
+
+        /*
+         | Groups.
+         |
+         | Both before conversations/{uuid} so the literal segments are not
+         | swallowed by the parameter.
+         */
+        Route::get('conversations/group-candidates', [V1Controller::class, 'groupCandidates'])
+            ->middleware('throttle:60,1')
+            ->name('conversations.candidates');
+
+        Route::post('conversations/group', [V1Controller::class, 'createGroup'])
+            ->middleware('throttle:20,1')
+            ->name('conversations.group');
 
         Route::get('conversations', [V1Controller::class, 'conversations'])
             ->name('conversations.index');

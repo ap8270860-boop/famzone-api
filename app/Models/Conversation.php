@@ -15,7 +15,7 @@ use Illuminate\Support\Str;
  * @property-read \Illuminate\Database\Eloquent\Collection<int, ConversationParticipant> $participants
  * @property-read ?Message $lastMessage
  */
-#[Fillable(['type', 'pair_key'])]
+#[Fillable(['type', 'pair_key', 'title'])]
 class Conversation extends Model
 {
     public const TYPE_DIRECT = 'direct';
@@ -97,6 +97,11 @@ class Conversation extends Model
     public function isDirect(): bool
     {
         return $this->type === self::TYPE_DIRECT;
+    }
+
+    public function isGroup(): bool
+    {
+        return $this->type === self::TYPE_GROUP;
     }
 
     /**

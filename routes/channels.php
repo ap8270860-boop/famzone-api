@@ -64,6 +64,18 @@ Broadcast::channel('conversation.{uuid}', function (User $user, string $uuid) {
      | it: they cannot resubscribe, and the server tells their client to drop
      | the channel. Cheap, because it only runs on subscribe.
      */
+    /*
+     | The wall check is about a pair, so it only applies to a pair.
+     |
+     | In a group, two members having blocked each other is their business:
+     | neither is removed from the room, and neither is cut off from everybody
+     | else in it. Applying the direct-thread rule here would drop somebody
+     | out of a group conversation the moment one member blocked them.
+     */
+    if ($conversation->isGroup()) {
+        return true;
+    }
+
     $others = $conversation->participants
         ->where('user_id', '!=', $user->id)
         ->pluck('user_id');

@@ -33,6 +33,7 @@ use App\Models\Post;
 use App\Models\User;
 use App\Services\Chat\AttachmentService;
 use App\Services\Chat\ChatService;
+use App\Services\Chat\GroupService;
 use App\Services\Chat\MessageActionService;
 use App\Services\Chat\PresenceService;
 use App\Services\Chat\ReactionService;
@@ -83,6 +84,7 @@ class V1Controller extends Controller
         private readonly ReactionService $reactions,
         private readonly MessageActionService $messageActions,
         private readonly ThreadSettingsService $threads,
+        private readonly GroupService $groups,
     ) {
     }
 
@@ -1119,6 +1121,71 @@ class V1Controller extends Controller
     }
 
     /**
+     * GET /api/v1/conversations/group-candidates?scope=connections|family
+     *
+     * Who this person may put in a group: everyone they follow or who
+     * follows them plus their family, or family alone.
+     */
+    public function groupCandidates(Request $request): JsonResponse
+    {
+        $scope = $request->string('scope', GroupService::SCOPE_CONNECTIONS)->toString();
+
+        abort_unless(
+            in_array($scope, [GroupService::SCOPE_CONNECTIONS, GroupService::SCOPE_FAMILY], true),
+            422,
+            'Unknown scope.',
+        );
+
+        return $this->ok($this->groups->candidates($request->user(), $scope), 'OK');
+    }
+
+    /**
+     * POST /api/v1/conversations/group   (multipart)
+     *
+     * {title, member_ids[], scope, avatar?}
+     *
+     * Multipart because the picture is chosen in the same step as the name —
+     * a two-request create would leave a group with no photo whenever the
+     * second one failed.
+     */
+    public function createGroup(CreateGroupRequest $request): JsonResponse
+    {
+        $me = $request->user();
+
+        $conversation = $this->groups->create(
+            $me,
+            $request->title(),
+            $request->memberIds(),
+            $request->scope(),
+            $request->file('avatar'),
+        );
+
+        return $this->created(
+            $this->chat->presentConversation($me, $conversation, withMembers: true),
+            'Group created.',
+        );
+    }
+
+    /**
+     * GET /api/v1/media/group/{uuid}   (signed)
+     *
+     * Streams a group picture. Not behind auth:sanctum — the signature is the
+     * credential, which is what lets the URL go straight into an <img> tag.
+     */
+    public function streamGroupAvatar(Request $request, string $uuid): StreamedResponse
+    {
+        $conversation = Conversation::where('uuid', $uuid)->first();
+
+        abort_if($conversation === null || blank($conversation->avatar_path), 404);
+
+        $disk = Storage::disk(config('filesystems.default'));
+
+        abort_unless($disk->exists($conversation->avatar_path), 404);
+
+        return $disk->response($conversation->avatar_path);
+    }
+
+    /**
      * GET /api/v1/conversations/unread-count
      *
      * Polled on cold start and whenever the app returns to the foreground,
@@ -1162,7 +1229,13 @@ class V1Controller extends Controller
         $me = $request->user();
 
         return $this->ok(
-            $this->chat->presentConversation($me, $this->chat->findConversation($me, $uuid)),
+            // Members only on the single-thread view. An inbox page of twenty
+            // groups has no business carrying every member of each of them.
+            $this->chat->presentConversation(
+                $me,
+                $this->chat->findConversation($me, $uuid),
+                withMembers: true,
+            ),
             'OK',
         );
     }
@@ -1279,7 +1352,22 @@ class V1Controller extends Controller
     {
         $me = $request->user();
 
-        $this->chat->leave($me, $this->chat->findConversation($me, $uuid));
+        $conversation = $this->chat->findConversation($me, $uuid);
+
+        /*
+         | Two different acts behind one endpoint.
+         |
+         | Leaving a direct thread keeps the row so a later message reopens
+         | it. Leaving a group is a fact the room can see, and nothing pulls
+         | you back in on its own.
+         */
+        if ($conversation->isGroup()) {
+            $this->groups->leave($me, $conversation);
+
+            return $this->ok(null, 'You left the group.');
+        }
+
+        $this->chat->leave($me, $conversation);
 
         return $this->ok(null, 'Conversation removed.');
     }

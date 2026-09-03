@@ -16,6 +16,9 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 #[Fillable(['state', 'muted_until'])]
 class ConversationParticipant extends Model
 {
+    public const ROLE_ADMIN = 'admin';
+    public const ROLE_MEMBER = 'member';
+
     public const STATE_PENDING = 'pending';
     public const STATE_ACCEPTED = 'accepted';
     public const STATE_ARCHIVED = 'archived';
@@ -84,6 +87,11 @@ class ConversationParticipant extends Model
     public function isArchived(): bool
     {
         return $this->archived_at !== null;
+    }
+
+    public function isAdmin(): bool
+    {
+        return $this->role === self::ROLE_ADMIN;
     }
 
     /**

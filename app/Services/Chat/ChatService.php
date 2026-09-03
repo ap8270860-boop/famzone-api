@@ -278,10 +278,20 @@ class ChatService
             // put a draft; it has no business in either person's list until
             // something is actually said.
             ->whereNotNull('last_message_at')
-            // Blocking hides the thread without destroying it.
-            ->whereDoesntHave('participants', fn (Builder $q) => $q
-                ->where('user_id', '!=', $me->id)
-                ->whereIn('user_id', Block::wallIds($me->id)))
+            /*
+             | Blocking hides a direct thread without destroying it.
+             |
+             | Only a direct thread. In a group, a wall between two members is
+             | a fact about those two — hiding the whole room from everybody
+             | else in it because of one pair would be a strange kind of
+             | moderation, and would make a group vanish for reasons nobody
+             | could see.
+             */
+            ->where(fn (Builder $outer) => $outer
+                ->where('type', '!=', Conversation::TYPE_DIRECT)
+                ->orWhereDoesntHave('participants', fn (Builder $q) => $q
+                    ->where('user_id', '!=', $me->id)
+                    ->whereIn('user_id', Block::wallIds($me->id))))
             /*
              | Pinned chats first.
              |
@@ -519,22 +529,39 @@ class ChatService
     public function send(User $sender, Conversation $conversation, array $payload): array
     {
         $mine = $this->participantOrFail($conversation, $sender);
-        $other = $this->otherParticipant($conversation, $sender);
 
-        abort_if($other === null, 422, 'That conversation has nobody in it.');
+        /*
+         | Null in a group, deliberately.
+         |
+         | otherParticipant() answers "the other one", which in a room of six
+         | is an arbitrary person rather than a wrong answer you would notice.
+         | Everything below that depends on there being exactly one other
+         | person is therefore skipped for groups: the block rule is about a
+         | pair, and the message-request cap is about somebody you have not
+         | been introduced to.
+         */
+        $other = $conversation->isDirect()
+            ? $this->otherParticipant($conversation, $sender)
+            : null;
 
-        abort_unless(
-            $this->canMessage($sender, $other->user),
-            403,
-            'You cannot message this account.',
-        );
+        if ($conversation->isDirect()) {
+            abort_if($other === null, 422, 'That conversation has nobody in it.');
+
+            abort_unless(
+                $this->canMessage($sender, $other->user),
+                403,
+                'You cannot message this account.',
+            );
+        }
 
         // Cheap path first: an obvious replay never opens a transaction.
         if ($existing = $this->findByClientUuid($conversation, $payload['client_uuid'])) {
             return ['message' => $this->presentMessage($existing), 'replayed' => true];
         }
 
-        $this->guardRequestCap($conversation, $sender, $other);
+        if ($other !== null) {
+            $this->guardRequestCap($conversation, $sender, $other);
+        }
 
         try {
             $message = DB::transaction(
@@ -599,7 +626,7 @@ class ChatService
     private function persist(
         User $sender,
         Conversation $conversation,
-        ConversationParticipant $other,
+        ?ConversationParticipant $other,
         array $payload,
     ): Message {
         /*
@@ -686,12 +713,21 @@ class ChatService
         // A message to somebody who declined puts the thread back in front of
         // them as a fresh request rather than disappearing into a row nobody
         // will ever look at again.
-        $reopen = $other->hasLeft()
+        /*
+         | A message reopens a direct thread the other person had left.
+         |
+         | Not a group: leaving a group is a decision the room watched you
+         | make, and a message from somebody else must not quietly put you
+         | back in it.
+         */
+        $reopen = $other !== null && $other->hasLeft()
             ? ['left_at' => null, 'state' => $this->stateFor($other->user, $sender)]
             : [];
 
         ConversationParticipant::where('conversation_id', $conversation->id)
             ->where('user_id', '!=', $sender->id)
+            // In a group, only the people still in it.
+            ->when($conversation->isGroup(), fn ($q) => $q->whereNull('left_at'))
             ->update(array_merge($reopen, [
                 'unread_count' => DB::raw('unread_count + 1'),
                 'updated_at' => now(),
@@ -865,10 +901,17 @@ class ChatService
     /**
      * @return array<string, mixed>
      */
-    public function presentConversation(User $me, Conversation $conversation): array
-    {
+    public function presentConversation(
+        User $me,
+        Conversation $conversation,
+        bool $withMembers = false,
+    ): array {
         $mine = $conversation->participants->firstWhere('user_id', $me->id);
-        $other = $conversation->participants->firstWhere(
+
+        // Null for a group, where there is no "other person" to be the
+        // subject of the row. The group block below carries what a group row
+        // needs instead — its name, its picture, and how many are in it.
+        $other = $conversation->isGroup() ? null : $conversation->participants->firstWhere(
             fn (ConversationParticipant $p) => $p->user_id !== $me->id,
         );
 
@@ -890,6 +933,12 @@ class ChatService
              | which is shared and lives on the conversation.
              */
             'pinned' => $mine?->pinned_at !== null,
+
+            // Null on a direct thread, so a client can tell the two
+            // apart from one field rather than from `type`.
+            'group' => $conversation->isGroup()
+                ? app(GroupService::class)->present($me, $conversation, $withMembers)
+                : null,
             'archived' => $mine?->archived_at !== null,
             'marked_unread' => (bool) ($mine?->marked_unread ?? false),
             // Both read off the message actually being shown, so a row
