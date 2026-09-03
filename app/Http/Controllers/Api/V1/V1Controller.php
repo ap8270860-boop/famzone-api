@@ -9,6 +9,7 @@ use App\Http\Requests\Api\V1\Auth\LoginRequest;
 use App\Http\Requests\Api\V1\Auth\RegisterRequest;
 use App\Http\Requests\Api\V1\Auth\SendOtpRequest;
 use App\Http\Requests\Api\V1\Auth\VerifyOtpRequest;
+use App\Http\Requests\Api\V1\Chat\CreateGroupRequest;
 use App\Http\Requests\Api\V1\Chat\ForwardRequest;
 use App\Http\Requests\Api\V1\Chat\PinRequest;
 use App\Http\Requests\Api\V1\Chat\ReactRequest;
