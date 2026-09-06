@@ -24,6 +24,8 @@ use App\Http\Requests\Api\V1\Location\ShareLocationRequest;
 use App\Http\Requests\Api\V1\Posts\CreatePostRequest;
 use App\Http\Requests\Api\V1\Profile\UpdateAvatarRequest;
 use App\Http\Requests\Api\V1\Safety\CheckInRequest;
+use App\Http\Requests\Api\V1\Safety\NearbyPlacesRequest;
+use App\Http\Requests\Api\V1\Safety\StartSosRequest;
 use App\Http\Requests\Api\V1\Social\BlockRequest;
 use App\Http\Requests\Api\V1\Social\FamilyInviteRequest;
 use App\Http\Requests\Api\V1\Social\RespondRequest;
@@ -49,7 +51,10 @@ use App\Services\Otp\Exceptions\OtpException;
 use App\Services\Otp\OtpService;
 use App\Services\Posts\PostService;
 use App\Services\Profile\UsernameChecker;
+use App\Services\Safety\EmergencyDirectory;
+use App\Services\Safety\PlacesService;
 use App\Services\Safety\SafetyService;
+use App\Services\Safety\SosService;
 use App\Services\Social\BlockService;
 use App\Services\Social\NotificationService;
 use App\Services\Social\RelationshipService;
@@ -92,6 +97,9 @@ class V1Controller extends Controller
         private readonly ThreadSettingsService $threads,
         private readonly GroupService $groups,
         private readonly LocationService $locations,
+        private readonly SosService $sos,
+        private readonly PlacesService $places,
+        private readonly EmergencyDirectory $directory,
     ) {
     }
 
@@ -574,6 +582,153 @@ class V1Controller extends Controller
         $days = max(1, min(365, $days));
 
         return $this->ok($this->safety->history($request->user(), $days), 'OK');
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | SOS
+    |--------------------------------------------------------------------------
+    |
+    | One rule runs through all of these: the emergency numbers must appear
+    | even when everything else has failed. They come from EmergencyDirectory,
+    | which is a plain PHP array and touches no network, no cache and no
+    | Google. Nearby places are the enhancement; the numbers are the feature.
+    |
+    */
+
+    /**
+     * GET /api/v1/sos
+     *
+     * The screen, cold: every service with its numbers and guidance, plus
+     * whatever alert is already running.
+     */
+    public function sosOverview(Request $request): JsonResponse
+    {
+        return $this->ok($this->sos->overview($request->user()), 'OK');
+    }
+
+    /**
+     * POST /api/v1/sos   { category?, latitude?, longitude?, note? }
+     *
+     * Raise the alarm. Records it, opens family location sharing, and tells
+     * every family member with the app open.
+     *
+     * Idempotent: pressing twice returns the alert already running rather
+     * than starting a second one. People double-tap buttons they press in a
+     * panic, and one emergency must not become two alarms.
+     */
+    public function startSos(StartSosRequest $request): JsonResponse
+    {
+        return $this->ok(
+            $this->sos->start($request->user(), $request->validated()),
+            'Help is being alerted.',
+        );
+    }
+
+    /**
+     * POST /api/v1/sos/{uuid}   { category?, note?, latitude?, longitude? }
+     *
+     * Attach a category once the person has worked out who they need, or
+     * refresh the position once a better fix arrives.
+     */
+    public function updateSos(StartSosRequest $request, string $uuid): JsonResponse
+    {
+        return $this->ok(
+            $this->sos->update($request->user(), $uuid, $request->validated()),
+            'OK',
+        );
+    }
+
+    /**
+     * POST /api/v1/sos/{uuid}/end   { status: resolved|cancelled|false_alarm }
+     */
+    public function endSos(Request $request, string $uuid): JsonResponse
+    {
+        return $this->ok($this->sos->end(
+            $request->user(),
+            $uuid,
+            (string) $request->input('status', 'resolved'),
+        ), 'Alert ended.');
+    }
+
+    /**
+     * GET /api/v1/sos/history
+     */
+    public function sosHistory(Request $request): JsonResponse
+    {
+        return $this->ok(
+            $this->sos->history($request->user(), (int) $request->integer('page', 1)),
+            'OK',
+        );
+    }
+
+    /**
+     * GET /api/v1/sos/nearby?category=police&latitude=&longitude=
+     * GET /api/v1/sos/nearby?query=apollo&latitude=&longitude=
+     *
+     * Nearest places of a kind, or a typed search. Proxied and cached here
+     * rather than called from the app: the key is IP-restricted to this
+     * server, and one paid lookup serves everybody in the same neighbourhood
+     * for a week.
+     *
+     * Never carries phone numbers — those bill at a scarcer tier and are
+     * fetched one at a time, on tap, through the endpoint below.
+     */
+    public function sosNearby(NearbyPlacesRequest $request): JsonResponse
+    {
+        $lat = (float) $request->validated('latitude');
+        $lng = (float) $request->validated('longitude');
+
+        $query = $request->validated('query');
+
+        if ($query !== null && $query !== '') {
+            return $this->ok([
+                'places' => $this->places->search($query, $lat, $lng),
+                'source' => 'search',
+            ], 'OK');
+        }
+
+        $category = (string) $request->validated('category');
+        $types = $this->directory->searchTypes($category);
+
+        if ($types === []) {
+            // A category with nothing to search for is not an error — several
+            // of them are phone-only by design, and the client should show
+            // the numbers without an empty list underneath.
+            return $this->ok(['places' => [], 'source' => 'none'], 'OK');
+        }
+
+        return $this->ok([
+            'places' => $this->places->nearby(
+                $types,
+                $lat,
+                $lng,
+                (int) ($request->validated('radius') ?? PlacesService::DEFAULT_RADIUS),
+            ),
+            'source' => 'nearby',
+        ], 'OK');
+    }
+
+    /**
+     * GET /api/v1/sos/places/{placeId}
+     *
+     * One place's phone number, for the Call button.
+     *
+     * The single most expensive call in the API — Google bills contact
+     * details at its Enterprise tier — so it exists on its own, is throttled
+     * hardest, and must only ever fire when somebody has actually tapped Call
+     * on one specific place. Fetching numbers for a list of twenty would cost
+     * twenty of these to answer a question nobody asked.
+     */
+    public function sosPlaceContact(string $placeId): JsonResponse
+    {
+        $contact = $this->places->contact($placeId);
+
+        if ($contact === null) {
+            return $this->fail('We could not get details for that place.', null, 404);
+        }
+
+        return $this->ok($contact, 'OK');
     }
 
     /*

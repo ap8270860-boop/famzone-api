@@ -35,4 +35,25 @@ return [
         ],
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Google
+    |--------------------------------------------------------------------------
+    |
+    | The Places key, and only the Places key. This is a different credential
+    | from the Maps SDK keys in the mobile app: those are restricted by
+    | package name and signing fingerprint and are expected to ship inside
+    | the binary, whereas this one is restricted by IP to this server and must
+    | never leave it.
+    |
+    | Empty is a supported state. PlacesService checks before every call and
+    | degrades to "no nearby places found" — the emergency numbers come from
+    | EmergencyDirectory and never touch Google, so an unconfigured or
+    | exhausted key can never stop somebody dialling 112.
+    |
+    */
+    'google' => [
+        'places_key' => env('GOOGLE_PLACES_KEY'),
+    ],
+
 ];

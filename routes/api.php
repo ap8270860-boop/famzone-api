@@ -177,6 +177,57 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
 
             Route::get('check-ins', [V1Controller::class, 'checkInHistory'])
                 ->name('check-ins');
+
+            /*
+             | SOS.
+             |
+             | `sos` is the screen, cold: the catalogue of services and
+             | whatever alert is already running. Polled on every open of the
+             | tab, so it gets the standard read limit.
+             |
+             | Raising and ending are throttled far tighter — not to protect
+             | the server, which barely notices them, but because each one
+             | reaches every member of somebody's family. A loop here is a
+             | family being woken up repeatedly, and that is the expensive
+             | failure.
+             |
+             | `nearby` and `contact` are the only endpoints in the API that
+             | cost money per call. `contact` bills at Google's Enterprise
+             | tier and is therefore the tightest of the lot — it should only
+             | ever fire when a person has tapped Call on one specific place.
+             */
+            Route::get('sos', [V1Controller::class, 'sosOverview'])
+                ->middleware('throttle:60,1')
+                ->name('sos.overview');
+
+            Route::post('sos', [V1Controller::class, 'startSos'])
+                ->middleware('throttle:10,1')
+                ->name('sos.start');
+
+            Route::get('sos/history', [V1Controller::class, 'sosHistory'])
+                ->middleware('throttle:60,1')
+                ->name('sos.history');
+
+            Route::get('sos/nearby', [V1Controller::class, 'sosNearby'])
+                ->middleware('throttle:40,1')
+                ->name('sos.nearby');
+
+            Route::get('sos/places/{placeId}', [V1Controller::class, 'sosPlaceContact'])
+                ->middleware('throttle:20,1')
+                ->where('placeId', '[A-Za-z0-9_\\-]+')
+                ->name('sos.place');
+
+            /*
+             | Last, so the literal segments above are not swallowed by the
+             | parameter — the same ordering rule as users/search.
+             */
+            Route::post('sos/{uuid}', [V1Controller::class, 'updateSos'])
+                ->middleware('throttle:30,1')
+                ->name('sos.update');
+
+            Route::post('sos/{uuid}/end', [V1Controller::class, 'endSos'])
+                ->middleware('throttle:30,1')
+                ->name('sos.end');
         });
 
         /*
