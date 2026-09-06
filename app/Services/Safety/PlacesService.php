@@ -96,9 +96,35 @@ class PlacesService
         'id,displayName,formattedAddress,location,'
         .'nationalPhoneNumber,internationalPhoneNumber,googleMapsUri';
 
+    /**
+     * Why the last lookup came back empty, if it did.
+     *
+     * Every method here degrades to an empty list, which is right — Google
+     * being unreachable must never stop somebody dialling 112. But an empty
+     * list with no explanation makes four completely different problems look
+     * identical: no key, key refused, API not enabled, and genuinely nothing
+     * nearby. Those have four different fixes, and the screen should say
+     * which one it is rather than shrugging.
+     */
+    private ?string $failure = null;
+
+    public function failure(): ?string
+    {
+        return $this->failure;
+    }
+
     public function configured(): bool
     {
         return ! empty(config('services.google.places_key'));
+    }
+
+    /**
+     * The unconfigured case, phrased for whoever has to fix it.
+     */
+    private function notConfigured(): void
+    {
+        $this->failure = 'Nearby search is not set up on the server yet '
+            .'(GOOGLE_PLACES_KEY is empty).';
     }
 
     /*
@@ -120,6 +146,8 @@ class PlacesService
         int $radius = self::DEFAULT_RADIUS,
     ): array {
         if ($types === [] || ! $this->configured()) {
+            if (! $this->configured()) $this->notConfigured();
+
             return [];
         }
 
@@ -193,6 +221,8 @@ class PlacesService
         $query = trim($query);
 
         if (mb_strlen($query) < 2 || ! $this->configured()) {
+            if (! $this->configured()) $this->notConfigured();
+
             return [];
         }
 
@@ -262,6 +292,8 @@ class PlacesService
     public function contact(string $placeId): ?array
     {
         if ($placeId === '' || ! $this->configured()) {
+            if (! $this->configured()) $this->notConfigured();
+
             return null;
         }
 
@@ -403,6 +435,40 @@ class PlacesService
     /**
      * @return array<string, string>
      */
+    /**
+     * Google's rejection, in words that point at the fix.
+     *
+     * The three that actually happen in practice are a Places API that was
+     * never enabled on the project, a key restricted to the wrong APIs, and
+     * an exhausted quota. All three arrive as a 403 or 429 with the real
+     * reason buried in a JSON body nobody reads, so it gets pulled out here.
+     */
+    private function explain(int $status, string $body): string
+    {
+        if (str_contains($body, 'SERVICE_DISABLED')
+            || str_contains($body, 'has not been used in project')) {
+            return 'The Places API (New) is not enabled for this Google Cloud '
+                .'project. Enable it in APIs & Services, then try again.';
+        }
+
+        if (str_contains($body, 'API_KEY_HTTP_REFERRER_BLOCKED')
+            || str_contains($body, 'API_KEY_IP_ADDRESS_BLOCKED')) {
+            return 'Google refused this key from this server. Check the key’s '
+                .'IP restriction matches the API server.';
+        }
+
+        if ($status === 403) {
+            return 'Google refused the request. Check the key exists and its '
+                .'API restrictions include Places API (New).';
+        }
+
+        if ($status === 429) {
+            return 'Google Places quota is exhausted for now.';
+        }
+
+        return "Google Places returned $status.";
+    }
+
     private function headers(string $fields): array
     {
         return [
@@ -444,6 +510,8 @@ class PlacesService
                 // without it.
                 'body' => mb_substr($response->body(), 0, 500),
             ]);
+
+            $this->failure = $this->explain($response->status(), $response->body());
 
             return null;
         }

@@ -682,9 +682,13 @@ class V1Controller extends Controller
         $query = $request->validated('query');
 
         if ($query !== null && $query !== '') {
+            $places = $this->places->search($query, $lat, $lng);
+
             return $this->ok([
-                'places' => $this->places->search($query, $lat, $lng),
+                'places' => $places,
                 'source' => 'search',
+                'available' => $this->places->configured(),
+                'reason' => $places === [] ? $this->places->failure() : null,
             ], 'OK');
         }
 
@@ -695,17 +699,26 @@ class V1Controller extends Controller
             // A category with nothing to search for is not an error — several
             // of them are phone-only by design, and the client should show
             // the numbers without an empty list underneath.
-            return $this->ok(['places' => [], 'source' => 'none'], 'OK');
+            return $this->ok([
+                'places' => [],
+                'source' => 'none',
+                'available' => true,
+                'reason' => null,
+            ], 'OK');
         }
 
+        $places = $this->places->nearby(
+            $types,
+            $lat,
+            $lng,
+            (int) ($request->validated('radius') ?? PlacesService::DEFAULT_RADIUS),
+        );
+
         return $this->ok([
-            'places' => $this->places->nearby(
-                $types,
-                $lat,
-                $lng,
-                (int) ($request->validated('radius') ?? PlacesService::DEFAULT_RADIUS),
-            ),
+            'places' => $places,
             'source' => 'nearby',
+            'available' => $this->places->configured(),
+            'reason' => $places === [] ? $this->places->failure() : null,
         ], 'OK');
     }
 
