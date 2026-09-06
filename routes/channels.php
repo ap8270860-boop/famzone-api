@@ -3,6 +3,7 @@
 use App\Models\Block;
 use App\Models\Conversation;
 use App\Models\User;
+use App\Services\Location\LocationService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Broadcast;
 
@@ -113,4 +114,31 @@ Broadcast::channel('room.{uuid}', function (User $user, string $uuid) {
         'uuid' => $user->uuid,
         'name' => $user->name,
     ];
+});
+
+/**
+ * One person's live position.
+ *
+ * Named after the person being watched rather than the person watching, so
+ * six family members following one phone cost the server one frame rather
+ * than six.
+ *
+ * The whole privacy model is the call to canView() below: a subscribe is
+ * allowed only while a live share grants it, and a frame never reaches a
+ * client that was not allowed to subscribe. There is no client-side
+ * filtering to get wrong.
+ *
+ * Authorisation runs once, at subscribe. What closes the window afterwards
+ * is that the server stops publishing the moment a share ends, and
+ * `location.share.ended` tells the client to drop the channel — the same
+ * belt-and-braces the conversation channel uses for blocks.
+ */
+Broadcast::channel('location.{uuid}', function (User $user, string $uuid) {
+    $sharer = User::where('uuid', $uuid)->first();
+
+    if ($sharer === null) {
+        return false;
+    }
+
+    return app(LocationService::class)->canView($user, $sharer);
 });

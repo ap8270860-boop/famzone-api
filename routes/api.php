@@ -362,6 +362,49 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
 
 
         /*
+         | Live location.
+         |
+         | `ping` is the highest-frequency authenticated endpoint in the
+         | API by an order of magnitude — a phone in a car sends one
+         | every five seconds — so its limit is set for a buffer flush
+         | after a dead spot rather than for the steady state. Everything
+         | else here is a deliberate human action and is capped like one.
+         |
+         | The server decides the sampling rate and hands it back on
+         | every ping; the client obeys. See LocationService::tracking.
+         */
+        Route::prefix('location')->name('location.')->group(function () {
+            Route::get('live', [V1Controller::class, 'liveLocations'])
+                ->middleware('throttle:120,1')
+                ->name('live');
+
+            Route::post('ping', [V1Controller::class, 'pingLocation'])
+                ->middleware('throttle:600,1')
+                ->name('ping');
+
+            Route::post('share', [V1Controller::class, 'shareLocation'])
+                ->middleware('throttle:30,1')
+                ->name('share');
+
+            Route::post('stop', [V1Controller::class, 'stopLocation'])
+                ->middleware('throttle:60,1')
+                ->name('stop');
+
+            Route::post('pin', [V1Controller::class, 'pinLocation'])
+                ->middleware('throttle:30,1')
+                ->name('pin');
+
+            /*
+             | Last, so the literal segments above are not swallowed by
+             | the parameter — the same ordering rule as users/search.
+             */
+            Route::get('{uuid}/trail', [V1Controller::class, 'locationTrail'])
+                ->middleware('throttle:60,1')
+                ->name('trail');
+        });
+
+
+        /*
          | Profile. The username check runs on every keystroke (debounced), so
          | it gets a looser throttle than the mutations beside it.
          */

@@ -12,6 +12,7 @@ use App\Models\Message;
 use App\Models\MessageAttachment;
 use App\Models\MessageHide;
 use App\Models\User;
+use App\Services\Location\LocationService;
 use App\Services\Social\RelationshipService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\QueryException;
@@ -794,6 +795,19 @@ class ChatService
             'attachment' => $deleted || $message->attachment === null
                 ? null
                 : $this->attachments->present($message->attachment),
+
+            /*
+             | Coordinates, when the message is a pin.
+             |
+             | Resolved through LocationService rather than read straight
+             | off the row, because a live share's bubble has to know
+             | whether it is still running — and that is a fact about the
+             | share, not about the message. Null for every other type,
+             | which is nearly all of them, at the cost of one comparison.
+             */
+            'location' => $deleted || $message->type !== Message::TYPE_LOCATION
+                ? null
+                : app(LocationService::class)->presentMessageLocation($message),
 
             'reply_to' => $this->presentQuote($message->replyTo),
 

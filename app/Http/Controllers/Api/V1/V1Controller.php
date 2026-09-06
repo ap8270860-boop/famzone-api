@@ -18,6 +18,9 @@ use App\Http\Requests\Api\V1\Chat\ReceiptRequest;
 use App\Http\Requests\Api\V1\Chat\SendMessageRequest;
 use App\Http\Requests\Api\V1\Chat\StartConversationRequest;
 use App\Http\Requests\Api\V1\Chat\UploadRequest;
+use App\Http\Requests\Api\V1\Location\PinLocationRequest;
+use App\Http\Requests\Api\V1\Location\PingLocationRequest;
+use App\Http\Requests\Api\V1\Location\ShareLocationRequest;
 use App\Http\Requests\Api\V1\Posts\CreatePostRequest;
 use App\Http\Requests\Api\V1\Profile\UpdateAvatarRequest;
 use App\Http\Requests\Api\V1\Safety\CheckInRequest;
@@ -41,6 +44,7 @@ use App\Services\Chat\PresenceService;
 use App\Services\Chat\ReactionService;
 use App\Services\Chat\ReceiptService;
 use App\Services\Chat\ThreadSettingsService;
+use App\Services\Location\LocationService;
 use App\Services\Otp\Exceptions\OtpException;
 use App\Services\Otp\OtpService;
 use App\Services\Posts\PostService;
@@ -87,6 +91,7 @@ class V1Controller extends Controller
         private readonly MessageActionService $messageActions,
         private readonly ThreadSettingsService $threads,
         private readonly GroupService $groups,
+        private readonly LocationService $locations,
     ) {
     }
 
@@ -1445,6 +1450,104 @@ class V1Controller extends Controller
     public function presencePing(Request $request): JsonResponse
     {
         return $this->ok($this->presence->ping($request->user()), 'OK');
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Live location
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * GET /api/v1/location/live
+     *
+     * Everything the map screen needs to paint itself from cold: who is
+     * currently sharing with me, where each of them is, what I am sharing,
+     * and how often my own phone should be looking.
+     *
+     * The socket carries deltas after this and nothing else. A dropped
+     * socket is therefore a stale map rather than an empty one — the same
+     * contract as chat, for the same reason.
+     */
+    public function liveLocations(Request $request): JsonResponse
+    {
+        return $this->ok($this->locations->live($request->user()), 'OK');
+    }
+
+    /**
+     * POST /api/v1/location/ping   { fixes: [ {latitude, longitude, ...} ] }
+     *
+     * A buffer of readings from one phone. Accepts a bare fix too.
+     *
+     * Always answers with what to do next, including "stop" — a client that
+     * never hears stop from the server is a client that tracks forever.
+     */
+    public function pingLocation(PingLocationRequest $request): JsonResponse
+    {
+        return $this->ok(
+            $this->locations->ping($request->user(), $request->validated('fixes')),
+            'OK',
+        );
+    }
+
+    /**
+     * POST /api/v1/location/share   { audience, conversation_id?, minutes? }
+     *
+     * Begin sharing. A conversation share announces itself with a message in
+     * the thread, in the same call — there is no path that starts one
+     * silently.
+     */
+    public function shareLocation(ShareLocationRequest $request): JsonResponse
+    {
+        return $this->ok(
+            $this->locations->share($request->user(), $request->validated()),
+            'Sharing your location.',
+        );
+    }
+
+    /**
+     * POST /api/v1/location/stop   { share_id? }
+     *
+     * Without a share_id this stops everything, which is what the status-bar
+     * button does: the action somebody is most likely to take in a hurry
+     * should not first ask them which share they meant.
+     */
+    public function stopLocation(Request $request): JsonResponse
+    {
+        return $this->ok(
+            $this->locations->stop($request->user(), $request->input('share_id')),
+            'Location sharing stopped.',
+        );
+    }
+
+    /**
+     * POST /api/v1/location/pin   { conversation_id, latitude, longitude }
+     *
+     * A static "here is where I am". No share, nothing to expire.
+     */
+    public function pinLocation(PinLocationRequest $request): JsonResponse
+    {
+        return $this->created($this->locations->pin(
+            $request->user(),
+            $request->validated('conversation_id'),
+            (float) $request->validated('latitude'),
+            (float) $request->validated('longitude'),
+        ), 'Location sent.');
+    }
+
+    /**
+     * GET /api/v1/location/{uuid}/trail?since=
+     *
+     * The recent path behind somebody's marker. Capped at 24 hours and
+     * thinned on the way out.
+     */
+    public function locationTrail(Request $request, string $uuid): JsonResponse
+    {
+        return $this->ok($this->locations->trail(
+            $request->user(),
+            $uuid,
+            $request->query('since'),
+        ), 'OK');
     }
 
     /**

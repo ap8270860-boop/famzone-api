@@ -136,6 +136,10 @@ class User extends Authenticatable
             'last_latitude' => 'decimal:7',
             'last_longitude' => 'decimal:7',
             'last_location_at' => 'datetime',
+            'last_location_accuracy' => 'integer',
+            'last_location_speed' => 'float',
+            'last_location_heading' => 'float',
+            'last_location_moving' => 'boolean',
             'battery_level' => 'integer',
 
             'last_sos_at' => 'datetime',

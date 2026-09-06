@@ -26,6 +26,9 @@ class Message extends Model
     public const TYPE_FILE = 'file';
     public const TYPE_AUDIO = 'audio';
 
+    /** A dropped pin, or a live share announcing itself in a thread. */
+    public const TYPE_LOCATION = 'location';
+
     /** Written by the server, never by a person. Joins, leaves, and so on. */
     public const TYPE_SYSTEM = 'system';
 
@@ -54,6 +57,8 @@ class Message extends Model
             'seq' => 'integer',
             'forwarded' => 'boolean',
             'edited_at' => 'datetime',
+            'latitude' => 'decimal:7',
+            'longitude' => 'decimal:7',
         ];
     }
 

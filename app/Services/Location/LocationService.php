@@ -1,0 +1,992 @@
+<?php
+
+namespace App\Services\Location;
+
+use App\Events\Location\LocationShareEnded;
+use App\Events\Location\LocationShareStarted;
+use App\Events\Location\LocationUpdated;
+use App\Models\Block;
+use App\Models\Conversation;
+use App\Models\ConversationParticipant;
+use App\Models\FamilyMember;
+use App\Models\LocationPing;
+use App\Models\LocationShare;
+use App\Models\Message;
+use App\Models\User;
+use App\Services\Chat\ChatService;
+use Carbon\CarbonImmutable;
+use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+
+/**
+ * Where everybody is, and who is allowed to know.
+ *
+ * Three separable things live here and it is worth naming them, because
+ * conflating them is how location features go wrong:
+ *
+ *  1. Permission — a live row in location_shares. Asked on every read and on
+ *     every websocket subscribe. Nothing else in the codebase decides this.
+ *  2. Truth — the last accepted fix, on the user row; the trail, in
+ *     location_pings. A fix is only "accepted" if it survives the filters in
+ *     ping(), which is what stops a bad cell-tower reading from teleporting
+ *     somebody across the city and back.
+ *  3. Cadence — how often the phone should look. Decided here and handed
+ *     back on every ping, so the server can quiet a client down without
+ *     shipping a new build. This is most of the battery story.
+ *
+ * The client is not trusted with (1) or (3), and is trusted with (2) only
+ * after the filters have had their say.
+ */
+class LocationService
+{
+    /*
+    |--------------------------------------------------------------------------
+    | Filtering
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * Metres of reported accuracy past which a fix is not worth drawing.
+     *
+     * A phone with no satellite lock will happily report a position derived
+     * from the cell tower it is attached to, with an accuracy of two or three
+     * kilometres. Plotted on a map that is not a rough position — it is a
+     * confident lie in the wrong neighbourhood, and it is the single most
+     * common source of "the app said I was somewhere I wasn't".
+     */
+    public const MAX_ACCURACY_M = 150;
+
+    /**
+     * Metres per second past which a jump is treated as a glitch, not travel.
+     *
+     * 90 m/s is 324 km/h — faster than any car and most trains, slower than a
+     * plane. Somebody actually flying loses their fix at the gate and picks a
+     * new one up on landing with a long enough gap that this test passes, so
+     * the ceiling costs nothing real and catches the classic tower-fix
+     * bounce.
+     */
+    public const MAX_SPEED_MS = 90.0;
+
+    /** A ping request carries a buffer, not a single point. */
+    public const MAX_FIXES_PER_PING = 60;
+
+    /*
+    |--------------------------------------------------------------------------
+    | Cadence
+    |--------------------------------------------------------------------------
+    */
+
+    /** Sampling while the phone reports it is moving. */
+    public const MOVING_INTERVAL_S = 5;
+    public const MOVING_DISTANCE_M = 15;
+
+    /** Sampling while it is not. A parked phone should cost nothing. */
+    public const STILL_INTERVAL_S = 45;
+    public const STILL_DISTANCE_M = 60;
+
+    /** How long a fix stays "live" on a map before it is drawn as stale. */
+    public const STALE_AFTER_S = 180;
+
+    /** Trail window ceiling, in hours. */
+    public const MAX_TRAIL_HOURS = 24;
+
+    public function __construct(private readonly ChatService $chat)
+    {
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Starting and stopping
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * Begin sharing.
+     *
+     * Starting a share that is already running replaces it rather than
+     * stacking a second one — tapping "share for 1 hour" twice means one
+     * share for an hour, not two overlapping shares whose expiry nobody can
+     * reason about. The replacement is silent for the same audience because
+     * the visible artefact (the chat bubble) is still on screen and still
+     * correct.
+     *
+     * @param  array<string, mixed>  $input
+     * @return array<string, mixed>
+     */
+    public function share(User $me, array $input): array
+    {
+        $audience = $input['audience'];
+
+        $conversation = null;
+
+        if ($audience === LocationShare::AUDIENCE_CONVERSATION) {
+            $conversation = Conversation::with('participants.user')
+                ->where('uuid', $input['conversation_id'])
+                ->first();
+
+            abort_if($conversation === null, 404, 'That conversation no longer exists.');
+
+            $mine = $conversation->participants->firstWhere('user_id', $me->id);
+
+            abort_if($mine === null || $mine->hasLeft(), 403, 'You are not in that conversation.');
+        }
+
+        /*
+         | The opening fix, if the phone had one ready.
+         |
+         | Optional on purpose: on a cold start the first satellite lock can
+         | take fifteen seconds, and making the user stare at a spinner
+         | before the share even begins is a worse experience than a pin that
+         | fills itself in a moment later.
+         */
+        if (isset($input['latitude'], $input['longitude'])) {
+            $this->ping($me, [[
+                'latitude' => $input['latitude'],
+                'longitude' => $input['longitude'],
+                'accuracy' => $input['accuracy'] ?? null,
+                'speed' => $input['speed'] ?? null,
+                'heading' => $input['heading'] ?? null,
+                'battery_level' => $input['battery_level'] ?? null,
+                'moving' => $input['moving'] ?? false,
+                'recorded_at' => $input['recorded_at'] ?? now()->toIso8601String(),
+            ]], broadcast: false);
+
+            $me->refresh();
+        }
+
+        $share = DB::transaction(function () use ($me, $audience, $conversation, $input) {
+            // Supersede rather than stack. See the note above.
+            $this->liveSharesOf($me)
+                ->where('audience', $audience)
+                ->when(
+                    $conversation !== null,
+                    fn ($q) => $q->where('conversation_id', $conversation->id),
+                )
+                ->update(['ended_at' => now()]);
+
+            $share = new LocationShare([
+                'audience' => $audience,
+                'started_at' => now(),
+                'expires_at' => $audience === LocationShare::AUDIENCE_FAMILY
+                    ? null
+                    : now()->addMinutes((int) $input['minutes']),
+            ]);
+
+            // Not Fillable, and mass assignment on this codebase fails
+            // silently rather than loudly. Assigned, not passed.
+            $share->user_id = $me->id;
+            $share->conversation_id = $conversation?->id;
+            $share->save();
+
+            $me->forceFill(['is_sharing_location' => true])->save();
+
+            return $share;
+        });
+
+        /*
+         | The announcement, after the commit.
+         |
+         | A share you cannot see is surveillance. Every conversation-scoped
+         | share puts a message in the thread, visible to everybody in it and
+         | impossible to send silently — the row and the bubble are created
+         | in the same call and there is no path that makes one without the
+         | other.
+         */
+        if ($conversation !== null) {
+            $message = $this->pinMessage($me, $conversation, $share);
+
+            $share->message_id = $message->id;
+            $share->save();
+        }
+
+        $viewers = $this->viewersOf($me, $share);
+
+        LocationShareStarted::dispatch($share->fresh(['user', 'conversation', 'message']), $viewers);
+
+        return [
+            'share' => $this->presentShare($share->fresh()),
+            'position' => $this->presentPosition($me->fresh()),
+            'tracking' => $this->tracking($me),
+        ];
+    }
+
+    /**
+     * Stop one share, or all of them.
+     *
+     * Passing no uuid stops everything, which is what the "stop sharing"
+     * button in the status bar does. That button is deliberately blunt: the
+     * one action a person is most likely to take in a hurry should not
+     * require them to first work out which of three shares they meant.
+     *
+     * @return array<string, mixed>
+     */
+    public function stop(User $me, ?string $shareUuid = null): array
+    {
+        $shares = $this->liveSharesOf($me)
+            ->when($shareUuid !== null, fn ($q) => $q->where('uuid', $shareUuid))
+            ->with(['conversation.participants.user', 'user'])
+            ->get();
+
+        foreach ($shares as $share) {
+            // Resolved before the share dies. Afterwards it resolves to
+            // nobody, and the people watching would never be told to stop.
+            $viewers = $this->viewersOf($me, $share);
+
+            $share->forceFill(['ended_at' => now()])->save();
+
+            if ($share->conversation !== null && $share->message_id !== null) {
+                /*
+                 | The bubble stays, and stops claiming to be live.
+                 |
+                 | Not deleted: "she shared her location at 4:10 and stopped
+                 | at 4:35" is the history, and a safety app that erases its
+                 | own record of what happened is not much of one.
+                 */
+                $this->chat->announce(
+                    $share->conversation,
+                    Message::with(['sender', 'attachment'])->find($share->message_id),
+                );
+            }
+
+            LocationShareEnded::dispatch($share, $viewers);
+        }
+
+        $stillSharing = $this->liveSharesOf($me)->exists();
+
+        if (! $stillSharing && $me->is_sharing_location) {
+            $me->forceFill(['is_sharing_location' => false])->save();
+        }
+
+        return [
+            'stopped' => $shares->count(),
+            'tracking' => $this->tracking($me->fresh()),
+        ];
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Receiving fixes
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * Take a buffer of fixes from one phone.
+     *
+     * Buffered rather than one-at-a-time because a phone in a tunnel, a lift
+     * or a dead spot keeps recording and flushes when it surfaces. Sending
+     * each of those as its own request would mean a burst of forty POSTs and
+     * a trail drawn in whatever order they happened to arrive.
+     *
+     * Returns what the client should do next, always — including when every
+     * fix was rejected, and including when the answer is "stop". A client
+     * that never hears "stop" from the server is a client that tracks
+     * forever, and that is how a safety app earns a one-star review about
+     * battery life.
+     *
+     * @param  array<int, array<string, mixed>>  $fixes
+     * @return array<string, mixed>
+     */
+    public function ping(User $me, array $fixes, bool $broadcast = true): array
+    {
+        $sharing = $this->liveSharesOf($me)->exists();
+
+        /*
+         | Nobody is watching, so nothing is recorded.
+         |
+         | Not an error: a client whose share expired thirty seconds ago is
+         | behaving correctly by sending one more buffer. It is told to stop
+         | and it stops. Recording anyway "just in case" would mean the
+         | database holds positions nobody ever consented to being stored.
+         */
+        if (! $sharing) {
+            return [
+                'accepted' => 0,
+                'rejected' => count($fixes),
+                'tracking' => $this->tracking($me),
+            ];
+        }
+
+        $fixes = array_slice($fixes, 0, self::MAX_FIXES_PER_PING);
+
+        // Oldest first, so each is filtered against the one before it rather
+        // than against whatever order the client happened to serialise.
+        usort($fixes, fn (array $a, array $b) => strcmp(
+            (string) ($a['recorded_at'] ?? ''),
+            (string) ($b['recorded_at'] ?? ''),
+        ));
+
+        $lastLat = $me->last_latitude !== null ? (float) $me->last_latitude : null;
+        $lastLng = $me->last_longitude !== null ? (float) $me->last_longitude : null;
+        $lastAt = $me->last_location_at ? CarbonImmutable::parse($me->last_location_at) : null;
+
+        $rows = [];
+        $newest = null;
+        $rejected = 0;
+        $now = now();
+
+        foreach ($fixes as $fix) {
+            $lat = (float) $fix['latitude'];
+            $lng = (float) $fix['longitude'];
+            $accuracy = isset($fix['accuracy']) ? (int) round((float) $fix['accuracy']) : null;
+
+            $at = isset($fix['recorded_at'])
+                ? CarbonImmutable::parse($fix['recorded_at'])
+                : CarbonImmutable::instance($now);
+
+            /*
+             | A clock ahead of the server's is a real thing on real phones.
+             | Clamped rather than rejected: the position is still true, only
+             | its timestamp is wrong, and throwing away good coordinates
+             | because a phone thinks it is Tuesday helps nobody.
+             */
+            if ($at->isAfter($now)) {
+                $at = CarbonImmutable::instance($now);
+            }
+
+            if ($accuracy !== null && $accuracy > self::MAX_ACCURACY_M) {
+                $rejected++;
+
+                continue;
+            }
+
+            // Already have this one, or something newer. Replays are common
+            // whenever a flush is retried after a timeout.
+            if ($lastAt !== null && $at->lessThanOrEqualTo($lastAt)) {
+                $rejected++;
+
+                continue;
+            }
+
+            if ($lastLat !== null && $lastLng !== null && $lastAt !== null) {
+                $seconds = max(1, $at->getTimestamp() - $lastAt->getTimestamp());
+                $metres = $this->metresBetween($lastLat, $lastLng, $lat, $lng);
+
+                if ($metres / $seconds > self::MAX_SPEED_MS) {
+                    $rejected++;
+
+                    continue;
+                }
+            }
+
+            $rows[] = [
+                'user_id' => $me->id,
+                'latitude' => $lat,
+                'longitude' => $lng,
+                'accuracy' => $accuracy,
+                'speed' => isset($fix['speed']) ? (float) $fix['speed'] : null,
+                'heading' => isset($fix['heading']) ? (float) $fix['heading'] : null,
+                'battery_level' => isset($fix['battery_level'])
+                    ? (int) $fix['battery_level']
+                    : null,
+                'moving' => (bool) ($fix['moving'] ?? false),
+                'recorded_at' => $at->toDateTimeString(),
+                'created_at' => $now->toDateTimeString(),
+            ];
+
+            $lastLat = $lat;
+            $lastLng = $lng;
+            $lastAt = $at;
+            $newest = end($rows);
+        }
+
+        if ($newest !== null) {
+            DB::transaction(function () use ($me, $rows, $newest) {
+                /*
+                 | insert(), not createMany().
+                 |
+                 | Two reasons. It is one statement for the whole buffer
+                 | rather than one per row, which matters on the highest-write
+                 | path in the system. And it bypasses mass assignment
+                 | entirely — on this codebase a non-Fillable column is
+                 | dropped silently, and a trail with null coordinates that
+                 | nothing complained about is a bad afternoon.
+                 */
+                LocationPing::insert($rows);
+
+                $me->forceFill([
+                    'last_latitude' => $newest['latitude'],
+                    'last_longitude' => $newest['longitude'],
+                    'last_location_accuracy' => $newest['accuracy'],
+                    'last_location_speed' => $newest['speed'],
+                    'last_location_heading' => $newest['heading'],
+                    'last_location_moving' => $newest['moving'],
+                    'last_location_at' => $newest['recorded_at'],
+                    'battery_level' => $newest['battery_level'] ?? $me->battery_level,
+                ])->save();
+            });
+        }
+
+        if ($newest !== null && $broadcast) {
+            /*
+             | A dead socket must not fail a ping.
+             |
+             | LocationUpdated broadcasts synchronously (see the note on that
+             | class), so a Reverb that is down or slow would otherwise turn
+             | into a failed write on the phone — which is the one thing that
+             | must never happen. The fix is already committed by this point;
+             | the worst case is a map that catches up on the next one.
+             */
+            try {
+                LocationUpdated::dispatch($me->fresh());
+            } catch (\Throwable $e) {
+                Log::warning('location broadcast failed', [
+                    'user' => $me->uuid,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        return [
+            'accepted' => count($rows),
+            'rejected' => $rejected,
+            'tracking' => $this->tracking($me),
+        ];
+    }
+
+    /**
+     * What the phone should do next.
+     *
+     * The client asks for nothing and obeys this. Making the server the
+     * authority means the sampling rate can be changed for everyone at once,
+     * a share that has expired can be shut down from here rather than hoping
+     * a timer on the phone fires, and — the reason it exists — a stationary
+     * phone can be told to look every 45 seconds instead of every 5.
+     *
+     * @return array<string, mixed>
+     */
+    public function tracking(User $me): array
+    {
+        $shares = $this->liveSharesOf($me)->get();
+
+        if ($shares->isEmpty()) {
+            return [
+                'active' => false,
+                'interval_seconds' => null,
+                'distance_filter' => null,
+                'until' => null,
+                'background' => false,
+            ];
+        }
+
+        $moving = (bool) $me->last_location_moving;
+
+        /*
+         | The soonest expiry across every live share.
+         |
+         | A null expiry (the family audience) beats any timestamp: if one
+         | share runs until stopped, the tracker does not get to switch
+         | itself off when a different, shorter one lapses.
+         */
+        $until = $shares->contains(fn (LocationShare $s) => $s->expires_at === null)
+            ? null
+            : $shares->min('expires_at');
+
+        return [
+            'active' => true,
+            'interval_seconds' => $moving ? self::MOVING_INTERVAL_S : self::STILL_INTERVAL_S,
+            'distance_filter' => $moving ? self::MOVING_DISTANCE_M : self::STILL_DISTANCE_M,
+            'until' => $until instanceof \DateTimeInterface
+                ? CarbonImmutable::instance($until)->toIso8601String()
+                : $until,
+
+            /*
+             | Whether to keep running with the app in the background.
+             |
+             | Only the family audience earns it. A fifteen-minute share in a
+             | chat does not justify a permanent notification and an "Always"
+             | permission prompt, and asking for those to power a share that
+             | expires before lunch is how an app gets rejected.
+             */
+            'background' => $shares->contains('audience', LocationShare::AUDIENCE_FAMILY),
+        ];
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Reading
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * The whole map, in one response.
+     *
+     * Everything the live map screen needs to paint itself from cold: who is
+     * visible to me, where each of them is, and what I am sharing. The
+     * socket only supplies deltas after this — the same contract as chat,
+     * and the same reason: a dropped socket is a stale map, never an empty
+     * one.
+     *
+     * @return array<string, mixed>
+     */
+    public function live(User $me): array
+    {
+        $shares = LocationShare::query()
+            ->live()
+            ->where('user_id', '!=', $me->id)
+            ->with(['user', 'conversation.participants'])
+            ->get()
+            ->filter(fn (LocationShare $share) => $this->grants($me, $share));
+
+        /*
+         | One person can be sharing with me twice over — a family share and
+         | a fifteen-minute one in a thread. That is one pin on the map, and
+         | the one that ends last is the one whose expiry it carries.
+         */
+        $people = $shares
+            ->groupBy(fn (LocationShare $share) => $share->user_id)
+            ->map(function (Collection $group) {
+                $sharer = $group->first()->user;
+
+                $widest = $group->sortBy(
+                    fn (LocationShare $s) => $s->expires_at?->getTimestamp() ?? PHP_INT_MAX,
+                )->last();
+
+                return [
+                    'user' => [
+                        'id' => $sharer->uuid,
+                        'name' => $sharer->name,
+                        'username' => $sharer->username,
+                        'avatar_url' => $sharer->avatar_url,
+                    ],
+                    'position' => $this->presentPosition($sharer),
+                    'share' => $this->presentShare($widest),
+                ];
+            })
+            ->values()
+            ->all();
+
+        $mine = $this->liveSharesOf($me)->with('conversation')->get();
+
+        return [
+            'people' => $people,
+            'me' => [
+                'position' => $this->presentPosition($me),
+                'shares' => $mine->map(fn (LocationShare $s) => $this->presentShare($s))
+                    ->values()->all(),
+            ],
+            'tracking' => $this->tracking($me),
+            'stale_after_seconds' => self::STALE_AFTER_S,
+        ];
+    }
+
+    /**
+     * One person's recent path.
+     *
+     * Capped at 24 hours and thinned on the way out: a phone moving for an
+     * hour produces hundreds of points, and a polyline does not get more
+     * accurate past a few hundred — it only gets heavier to send and slower
+     * to draw.
+     *
+     * @return array<string, mixed>
+     */
+    public function trail(User $viewer, string $sharerUuid, ?string $since = null): array
+    {
+        $sharer = User::where('uuid', $sharerUuid)->first();
+
+        abort_if($sharer === null, 404, 'That account no longer exists.');
+
+        abort_unless(
+            $sharer->id === $viewer->id || $this->canView($viewer, $sharer),
+            403,
+            'You cannot see that location.',
+        );
+
+        $floor = now()->subHours(self::MAX_TRAIL_HOURS);
+
+        $from = $since !== null
+            ? CarbonImmutable::parse($since)->max($floor)
+            : CarbonImmutable::instance($floor);
+
+        $points = LocationPing::query()
+            ->where('user_id', $sharer->id)
+            ->since($from)
+            ->orderBy('recorded_at')
+            ->limit(2000)
+            ->get(['latitude', 'longitude', 'accuracy', 'recorded_at']);
+
+        return [
+            'user_id' => $sharer->uuid,
+            'from' => $from->toIso8601String(),
+            'points' => $this->thin($points, 400)->map(fn (LocationPing $p) => [
+                'latitude' => (float) $p->latitude,
+                'longitude' => (float) $p->longitude,
+                'accuracy' => $p->accuracy,
+                'recorded_at' => $p->recorded_at->toIso8601String(),
+            ])->values()->all(),
+        ];
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Permission
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * May this person see that person's location, right now?
+     *
+     * The only answer to that question in the codebase. routes/channels.php
+     * calls it to authorise a websocket subscribe, and every read path calls
+     * it before returning a coordinate.
+     */
+    public function canView(User $viewer, User $sharer): bool
+    {
+        if ($viewer->id === $sharer->id) {
+            return true;
+        }
+
+        $shares = LocationShare::query()
+            ->live()
+            ->where('user_id', $sharer->id)
+            ->with('conversation.participants')
+            ->get();
+
+        foreach ($shares as $share) {
+            if ($this->grants($viewer, $share)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Whether one share, on its own, lets one person see the sharer.
+     */
+    private function grants(User $viewer, LocationShare $share): bool
+    {
+        /*
+         | A wall beats a share, in both directions.
+         |
+         | Blocking somebody has to revoke what they can see, and it has to
+         | do so without asking the person who blocked them to remember which
+         | shares they had running. Checked here rather than at share time so
+         | a block placed afterwards takes effect immediately.
+         */
+        if ($this->walled($viewer->id, $share->user_id)) {
+            return false;
+        }
+
+        if ($share->audience === LocationShare::AUDIENCE_FAMILY) {
+            return FamilyMember::query()
+                ->accepted()
+                ->where(function ($q) use ($viewer, $share) {
+                    $q->where(fn ($i) => $i
+                        ->where('owner_id', $share->user_id)
+                        ->where('member_id', $viewer->id))
+                        ->orWhere(fn ($i) => $i
+                            ->where('owner_id', $viewer->id)
+                            ->where('member_id', $share->user_id));
+                })
+                ->exists();
+        }
+
+        if ($share->audience === LocationShare::AUDIENCE_CONVERSATION) {
+            $mine = $share->conversation?->participants
+                ->firstWhere('user_id', $viewer->id);
+
+            return $mine !== null && ! $mine->hasLeft();
+        }
+
+        return false;
+    }
+
+    /**
+     * Everybody one share is visible to.
+     *
+     * @return array<int, User>
+     */
+    public function viewersOf(User $sharer, LocationShare $share): array
+    {
+        $users = match ($share->audience) {
+            LocationShare::AUDIENCE_FAMILY => $this->familyOf($sharer),
+
+            LocationShare::AUDIENCE_CONVERSATION => $share->conversation === null
+                ? collect()
+                : $share->conversation->participants()
+                    ->whereNull('left_at')
+                    ->where('user_id', '!=', $sharer->id)
+                    ->with('user')
+                    ->get()
+                    ->map(fn (ConversationParticipant $p) => $p->user),
+
+            default => collect(),
+        };
+
+        return $users
+            ->filter(fn (?User $u) => $u !== null && ! $this->walled($u->id, $sharer->id))
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Accepted family, from both ends of the link.
+     *
+     * @return \Illuminate\Support\Collection<int, User>
+     */
+    private function familyOf(User $user): \Illuminate\Support\Collection
+    {
+        $links = FamilyMember::query()
+            ->accepted()
+            ->involving($user->id)
+            ->with(['owner', 'member'])
+            ->get();
+
+        return $links
+            ->map(fn (FamilyMember $link) => $link->counterpartFor($user))
+            ->filter()
+            ->unique('id')
+            ->values();
+    }
+
+    /** A block in either direction between two ids. */
+    private function walled(int $a, int $b): bool
+    {
+        if ($a === $b) {
+            return false;
+        }
+
+        return Block::query()
+            ->where(fn ($q) => $q->where('blocker_id', $a)->where('blocked_id', $b))
+            ->orWhere(fn ($q) => $q->where('blocker_id', $b)->where('blocked_id', $a))
+            ->exists();
+    }
+
+    /**
+     * @return \Illuminate\Database\Eloquent\Builder<LocationShare>
+     */
+    private function liveSharesOf(User $user)
+    {
+        return LocationShare::query()->live()->where('user_id', $user->id);
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Messages
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * Drop a static pin into a thread.
+     *
+     * "Here is where I am" rather than "follow me". No share row, no
+     * tracking, nothing to expire — the coordinates on the message are the
+     * whole of it, and they are as true tomorrow as they are now because
+     * they are a statement about a moment rather than a claim about the
+     * present.
+     *
+     * @return array<string, mixed>
+     */
+    public function pin(User $me, string $conversationUuid, float $lat, float $lng): array
+    {
+        $conversation = Conversation::with('participants.user')
+            ->where('uuid', $conversationUuid)
+            ->first();
+
+        abort_if($conversation === null, 404, 'That conversation no longer exists.');
+
+        $mine = $conversation->participants->firstWhere('user_id', $me->id);
+
+        abort_if($mine === null || $mine->hasLeft(), 403, 'You are not in that conversation.');
+
+        $message = $this->pinMessage($me, $conversation, null, $lat, $lng);
+
+        return ['message' => $this->chat->presentMessage($message)];
+    }
+
+    /**
+     * The message row itself.
+     *
+     * Modelled on GroupService::systemMessage rather than routed through
+     * ChatService::send: a pin needs the seq allocation and the conversation
+     * bookkeeping, and none of the reply, attachment, block or
+     * message-request machinery that send() exists to apply.
+     */
+    private function pinMessage(
+        User $me,
+        Conversation $conversation,
+        ?LocationShare $share = null,
+        ?float $lat = null,
+        ?float $lng = null,
+    ): Message {
+        $lat ??= $me->last_latitude !== null ? (float) $me->last_latitude : null;
+        $lng ??= $me->last_longitude !== null ? (float) $me->last_longitude : null;
+
+        $message = DB::transaction(function () use ($conversation, $me, $share, $lat, $lng) {
+            $locked = Conversation::whereKey($conversation->id)->lockForUpdate()->firstOrFail();
+
+            $seq = $locked->last_seq + 1;
+
+            $message = new Message([
+                'type' => Message::TYPE_LOCATION,
+                'body' => $share !== null ? 'Live location' : 'Location',
+                'client_uuid' => (string) Str::uuid7(),
+            ]);
+
+            // Not Fillable. Assigned, or silently dropped.
+            $message->conversation_id = $conversation->id;
+            $message->sender_id = $me->id;
+            $message->seq = $seq;
+            $message->latitude = $lat;
+            $message->longitude = $lng;
+            $message->save();
+
+            $locked->forceFill([
+                'last_seq' => $seq,
+                'last_message_id' => $message->id,
+                'last_message_at' => $message->created_at,
+            ])->save();
+
+            return $message;
+        });
+
+        $fresh = $message->fresh(['sender', 'attachment']);
+
+        $this->chat->announce($conversation, $fresh);
+
+        return $fresh;
+    }
+
+    /**
+     * The location half of a message payload.
+     *
+     * Called from ChatService::presentMessage, which is why it is tolerant:
+     * a message whose share was deleted, or which never had one, is a static
+     * pin rather than an error.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function presentMessageLocation(Message $message): ?array
+    {
+        if ($message->type !== Message::TYPE_LOCATION) {
+            return null;
+        }
+
+        $share = LocationShare::where('message_id', $message->id)->first();
+
+        return [
+            'latitude' => $message->latitude !== null ? (float) $message->latitude : null,
+            'longitude' => $message->longitude !== null ? (float) $message->longitude : null,
+            'live' => $share !== null,
+            'active' => $share?->isLive() ?? false,
+            'share_id' => $share?->uuid,
+            'expires_at' => $share?->expires_at?->toIso8601String(),
+            'ended_at' => $share?->ended_at?->toIso8601String(),
+        ];
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Presentation
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function presentShare(LocationShare $share): array
+    {
+        return [
+            'id' => $share->uuid,
+            'user_id' => $share->user?->uuid ?? $share->user()->value('uuid'),
+            'audience' => $share->audience,
+            'conversation_id' => $share->conversation_id === null
+                ? null
+                : Conversation::whereKey($share->conversation_id)->value('uuid'),
+            'started_at' => $share->started_at?->toIso8601String(),
+            'expires_at' => $share->expires_at?->toIso8601String(),
+            'ended_at' => $share->ended_at?->toIso8601String(),
+            'active' => $share->isLive(),
+        ];
+    }
+
+    /**
+     * One position, as the map draws it.
+     *
+     * `age_seconds` rather than a bare timestamp because the client has to
+     * decide whether to grey the pin out, and doing that from a timestamp
+     * means trusting the phone's clock — which is the one clock in the
+     * system nobody controls.
+     *
+     * @return array<string, mixed>
+     */
+    public function presentPosition(User $user): array
+    {
+        $at = $user->last_location_at;
+
+        return [
+            'user_id' => $user->uuid,
+            'has_fix' => $user->last_latitude !== null,
+            'latitude' => $user->last_latitude !== null ? (float) $user->last_latitude : null,
+            'longitude' => $user->last_longitude !== null ? (float) $user->last_longitude : null,
+            'accuracy' => $user->last_location_accuracy,
+            'speed' => $user->last_location_speed !== null
+                ? (float) $user->last_location_speed
+                : null,
+            'heading' => $user->last_location_heading !== null
+                ? (float) $user->last_location_heading
+                : null,
+            'moving' => (bool) $user->last_location_moving,
+            'battery_level' => $user->battery_level,
+            'recorded_at' => $at?->toIso8601String(),
+            'age_seconds' => $at === null ? null : max(0, now()->diffInSeconds($at, true)),
+        ];
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Geometry
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * Great-circle distance in metres.
+     *
+     * Haversine, not a flat-earth approximation. The flat version is faster
+     * and wrong by a metre or two over the distances involved here, which
+     * would be fine — except it is wrong by more the further north you go,
+     * and a filter whose threshold drifts with latitude is a filter nobody
+     * can reason about.
+     */
+    private function metresBetween(float $lat1, float $lng1, float $lat2, float $lng2): float
+    {
+        $earth = 6371000.0;
+
+        $dLat = deg2rad($lat2 - $lat1);
+        $dLng = deg2rad($lng2 - $lng1);
+
+        $a = sin($dLat / 2) ** 2
+            + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin($dLng / 2) ** 2;
+
+        return $earth * 2 * atan2(sqrt($a), sqrt(1 - $a));
+    }
+
+    /**
+     * Drop every nth point until the trail fits.
+     *
+     * Crude on purpose. Douglas–Peucker would keep the corners and drop the
+     * straights, which is the correct answer, and it is also a page of code
+     * to maintain for a line drawn under a marker. If the trail ever becomes
+     * something people study rather than glance at, that is the upgrade.
+     *
+     * @param  Collection<int, LocationPing>  $points
+     * @return Collection<int, LocationPing>
+     */
+    private function thin(Collection $points, int $max): Collection
+    {
+        if ($points->count() <= $max) {
+            return $points;
+        }
+
+        $step = (int) ceil($points->count() / $max);
+
+        // The last point is kept whatever the stride lands on: the end of a
+        // trail is where the person is, and dropping it would leave the line
+        // stopping short of their own marker.
+        return $points
+            ->filter(fn ($p, int $i) => $i % $step === 0 || $i === $points->count() - 1)
+            ->values();
+    }
+}
