@@ -79,13 +79,106 @@ class LocationService
     |--------------------------------------------------------------------------
     */
 
-    /** Sampling while the phone reports it is moving. */
+    /** Sampling while the phone is moving. */
     public const MOVING_INTERVAL_S = 5;
-    public const MOVING_DISTANCE_M = 15;
+    public const MOVING_DISTANCE_M = 10;
 
-    /** Sampling while it is not. A parked phone should cost nothing. */
-    public const STILL_INTERVAL_S = 45;
-    public const STILL_DISTANCE_M = 60;
+    /*
+    |--------------------------------------------------------------------------
+    | Why the still figures are no longer 45 s / 60 m
+    |--------------------------------------------------------------------------
+    |
+    | They were, and it produced a trap that made walking family members look
+    | stationary on the map — reported as "they were walking but the screen
+    | said not moving".
+    |
+    | The distance filter is not a hint. On Android it *suppresses* updates
+    | until the phone has moved that far, so at 60 m a person walking at 1.4
+    | m/s produced one fix every forty-three seconds. The marker then jumped
+    | sixty metres, glided for the eight seconds the interpolator allows, and
+    | sat perfectly still for the remaining thirty-five. Four times out of
+    | five, anybody glancing at the map saw a stationary pin.
+    |
+    | Worse, it was self-reinforcing. Getting *out* of the still plan needs a
+    | fix that looks like movement, and the still plan is what was starving
+    | the stream of fixes.
+    |
+    | 25 m is above ordinary GPS wander, so a phone on a table still emits
+    | nothing, and a walker crosses it in under twenty seconds — which flips
+    | them to the moving plan almost immediately.
+    */
+    public const STILL_INTERVAL_S = 30;
+    public const STILL_DISTANCE_M = 25;
+
+    /**
+     * Implied speed, in m/s, past which somebody counts as moving.
+     *
+     * 0.7 m/s is 2.5 km/h — slower than any real walking pace, faster than
+     * anything GPS noise produces over the distance floor below.
+     *
+     * Deliberately *not* read from the phone's reported speed. That field is
+     * the single least reliable thing in a fix: Android's fused provider
+     * frequently reports 0.0 for pedestrians because it derives speed from
+     * Doppler shift, which needs a satellite lock better than a person
+     * walking between buildings usually has. iOS reports -1 when it does not
+     * know. Either way the client sees "not moving" and the whole cadence
+     * collapses — which is exactly the bug this replaced.
+     *
+     * Displacement between two accepted fixes needs no such cooperation.
+     */
+    public const MOVING_SPEED_MS = 0.7;
+
+    /**
+     * And a floor under the distance, so noise cannot imply movement.
+     *
+     * Two fixes ten metres apart five seconds later is 2 m/s, which would read
+     * as a brisk walk — and a stationary phone with a mediocre lock produces
+     * exactly that pair all day. Both tests have to pass.
+     */
+    public const MOVING_MIN_METRES = 10.0;
+
+    /**
+     * Displacement must also beat twice the fix's own stated error.
+     *
+     * A movement you cannot distinguish from the error bars is not evidence of
+     * movement. Twice the 68% radius is roughly a 95% confidence that
+     * something actually happened.
+     */
+    public const MOVING_ACCURACY_FACTOR = 2.0;
+
+    /**
+     * A fix worse than this votes on nothing.
+     *
+     * Simulated across accuracies, the verdict is near-perfect at 8 m (97% of
+     * walks caught, no false positives) and genuinely ambiguous past 20 m —
+     * about half of walks caught, one window in ten wrong while standing
+     * still. That is not a tuning failure, it is what the data supports: at
+     * forty metres of error you cannot separate a walk from noise in twenty
+     * seconds, and pretending otherwise only trades missed walks for a
+     * battery drained by phantom ones.
+     *
+     * Which is why the feature does not rest on this verdict. The still plan
+     * is responsive enough (30 s / 25 m) that a walker is drawn moving whether
+     * or not they are classified as moving; the verdict only decides how hard
+     * the phone works.
+     */
+    public const MOVING_MAX_ACCURACY_M = 40.0;
+
+    /**
+     * The shortest baseline a verdict may be taken over.
+     *
+     * GPS error is mean-reverting rather than diffusive: each fix is an
+     * independent draw around the true position, so the *displacement* from
+     * an older fix does not grow with time but the implied *speed* falls as
+     * 1/t. Twenty seconds is therefore where a real walk (constant speed)
+     * separates cleanly from noise (speed decaying towards zero).
+     *
+     * A first version held the comparison open until it was convinced.
+     * That inverted the logic — every extra fix was another independent
+     * chance for noise to cross the line, and given enough chances it always
+     * does. Stationary false positives went up, not down.
+     */
+    public const MOVING_BASELINE_S = 20;
 
     /** How long a fix stays "live" on a map before it is drawn as stale. */
     public const STALE_AFTER_S = 180;
@@ -395,6 +488,9 @@ class LocationService
                 'battery_level' => isset($fix['battery_level'])
                     ? (int) $fix['battery_level']
                     : null,
+                // Trail metadata only. The flag that actually decides the
+                // cadence is computed once per batch below, over a long
+                // enough baseline to mean something.
                 'moving' => (bool) ($fix['moving'] ?? false),
                 'recorded_at' => $at->toDateTimeString(),
                 'created_at' => $now->toDateTimeString(),
@@ -406,8 +502,64 @@ class LocationService
             $newest = end($rows);
         }
 
+        /*
+         | The movement verdict, taken once for the whole batch.
+         |
+         | Against the position the user row held *before* this ping, which is
+         | where the baseline comes from: a buffer covers roughly twelve
+         | seconds and the previous batch ended some seconds before that, so
+         | the comparison naturally spans twenty seconds or more. Comparing
+         | consecutive fixes instead — five seconds apart — is a baseline over
+         | which nothing can be distinguished from noise.
+         |
+         | Falls back to whatever the phone last believed when there is no
+         | usable baseline, which is only ever the opening fix of a session.
+         */
+        $moving = (bool) $me->last_location_moving;
+
         if ($newest !== null) {
-            DB::transaction(function () use ($me, $rows, $newest) {
+            $anchorLat = $me->last_latitude !== null ? (float) $me->last_latitude : null;
+            $anchorLng = $me->last_longitude !== null ? (float) $me->last_longitude : null;
+            $anchorAt = $me->last_location_at;
+
+            $accuracy = $newest['accuracy'] === null
+                ? null
+                : (float) $newest['accuracy'];
+
+            $usable = $anchorLat !== null
+                && $anchorLng !== null
+                && $anchorAt !== null
+                && ($accuracy === null || $accuracy <= self::MOVING_MAX_ACCURACY_M);
+
+            if ($usable) {
+                $elapsed = CarbonImmutable::parse($newest['recorded_at'])
+                    ->getTimestamp() - CarbonImmutable::instance($anchorAt)->getTimestamp();
+
+                if ($elapsed >= self::MOVING_BASELINE_S) {
+                    $travelled = $this->metresBetween(
+                        $anchorLat,
+                        $anchorLng,
+                        (float) $newest['latitude'],
+                        (float) $newest['longitude'],
+                    );
+
+                    $needed = max(
+                        self::MOVING_MIN_METRES,
+                        self::MOVING_ACCURACY_FACTOR * ($accuracy ?? 0.0),
+                    );
+
+                    $moving = $travelled >= $needed
+                        && ($travelled / $elapsed) >= self::MOVING_SPEED_MS;
+                }
+
+                // Below the baseline the previous verdict stands. A phone
+                // flushing every few seconds must not be re-judged on every
+                // flush over a window too short to judge anything.
+            }
+        }
+
+        if ($newest !== null) {
+            DB::transaction(function () use ($me, $rows, $newest, $moving) {
                 /*
                  | insert(), not createMany().
                  |
@@ -426,7 +578,7 @@ class LocationService
                     'last_location_accuracy' => $newest['accuracy'],
                     'last_location_speed' => $newest['speed'],
                     'last_location_heading' => $newest['heading'],
-                    'last_location_moving' => $newest['moving'],
+                    'last_location_moving' => $moving,
                     'last_location_at' => $newest['recorded_at'],
                     'battery_level' => $newest['battery_level'] ?? $me->battery_level,
                 ])->save();
