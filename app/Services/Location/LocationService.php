@@ -92,6 +92,18 @@ class LocationService
     /** Trail window ceiling, in hours. */
     public const MAX_TRAIL_HOURS = 24;
 
+    /**
+     * How recently somebody must have been seen to count as online.
+     *
+     * Deliberately longer than STALE_AFTER_S. They are different questions:
+     * staleness asks "is this position still worth believing", presence asks
+     * "is this person reachable". A phone in a pocket with the screen off
+     * stops producing fixes long before the person stops being contactable,
+     * and marking them offline after three minutes would make the roster
+     * look like a family that had all gone missing at once.
+     */
+    public const ONLINE_WITHIN_S = 300;
+
     public function __construct(private readonly ChatService $chat)
     {
     }
@@ -559,8 +571,12 @@ class LocationService
 
         $mine = $this->liveSharesOf($me)->with('conversation')->get();
 
+        $family = $this->roster($me, $shares);
+
         return [
             'people' => $people,
+            'family' => $family,
+            'status' => $this->summarise($family),
             'me' => [
                 'position' => $this->presentPosition($me),
                 'shares' => $mine->map(fn (LocationShare $s) => $this->presentShare($s))
@@ -568,6 +584,190 @@ class LocationService
             ],
             'tracking' => $this->tracking($me),
             'stale_after_seconds' => self::STALE_AFTER_S,
+            'online_within_seconds' => self::ONLINE_WITHIN_S,
+        ];
+    }
+
+    /**
+     * Everybody in my family, whether or not they are sharing.
+     *
+     * `people` above answers "who can I draw on the map". This answers "who
+     * is in my family", which is a different and larger set — and it is the
+     * one the status card is about. A card that says "4 members safe" has to
+     * count the member whose phone is in a drawer, or it is not a family
+     * status card, it is a sharing indicator with a misleading title.
+     *
+     * A member who is not sharing still gets a row: name, avatar, presence,
+     * and a null position. The client draws no pin for them and says so.
+     *
+     * @param  Collection<int, LocationShare>  $visibleShares  already filtered by grants()
+     * @return array<int, array<string, mixed>>
+     */
+    private function roster(User $me, Collection $visibleShares): array
+    {
+        $sharing = $visibleShares->groupBy(fn (LocationShare $share) => $share->user_id);
+
+        return $this->familyOf($me)
+            ->map(function (User $member) use ($sharing) {
+                $shares = $sharing->get($member->id);
+                $visible = $shares !== null && $shares->isNotEmpty();
+
+                return [
+                    'user' => [
+                        'id' => $member->uuid,
+                        'name' => $member->name,
+                        'username' => $member->username,
+                        'avatar_url' => $member->avatar_url,
+                    ],
+                    'sharing' => $visible,
+
+                    /*
+                     | Null rather than a stale position when they are not
+                     | sharing. The row still exists, so the client can show
+                     | the person; what it must not do is draw a pin from
+                     | whenever they last shared and let it age silently on
+                     | the map. Permission to be seen is not permission that
+                     | outlives the share.
+                     */
+                    'position' => $visible ? $this->presentPosition($member) : null,
+                    'presence' => $this->presence($member),
+                    'movement' => $visible ? $this->movementOf($member) : 'unknown',
+                ];
+            })
+            ->all();
+    }
+
+    /**
+     * Online, offline, or none of your business.
+     *
+     * `show_last_seen` is a real setting and it is honoured here rather than
+     * in the client, because a client that receives the timestamp and
+     * promises not to render it has still received the timestamp.
+     *
+     * @return array<string, mixed>
+     */
+    private function presence(User $user): array
+    {
+        if (! $user->show_last_seen) {
+            return ['state' => 'hidden', 'last_seen_at' => null, 'age_seconds' => null];
+        }
+
+        $at = $user->last_seen_at;
+
+        if ($at === null) {
+            return ['state' => 'offline', 'last_seen_at' => null, 'age_seconds' => null];
+        }
+
+        $age = max(0, now()->diffInSeconds($at, true));
+
+        return [
+            'state' => $age <= self::ONLINE_WITHIN_S ? 'online' : 'offline',
+            'last_seen_at' => $at->toIso8601String(),
+            'age_seconds' => $age,
+        ];
+    }
+
+    /**
+     * What somebody is doing, in one word.
+     *
+     * Phase 1 answers this from the motion flag alone. Phase 2 replaces the
+     * return value with a place name — "home", "school" — when the position
+     * falls inside a family place, and the client already renders whatever
+     * string arrives. That is the point of computing it here: the card's
+     * vocabulary can grow without a store release.
+     */
+    private function movementOf(User $user): string
+    {
+        $at = $user->last_location_at;
+
+        if ($at === null) {
+            return 'unknown';
+        }
+
+        if (now()->diffInSeconds($at, true) > self::STALE_AFTER_S) {
+            return 'stale';
+        }
+
+        return $user->last_location_moving ? 'travelling' : 'stationary';
+    }
+
+    /**
+     * The family status card, decided server-side.
+     *
+     * The client renders buckets it is handed and counts nothing itself.
+     * That is what lets Phase 2 add "At Home" and "At School" — which need
+     * the places table the client knows nothing about — by changing this
+     * method alone.
+     *
+     * The tone is deliberately not alarming by default. A safety app that
+     * shouts at you when somebody's phone is simply asleep teaches people to
+     * ignore it, and then it is not there on the day it matters.
+     *
+     * @param  array<int, array<string, mixed>>  $family
+     * @return array<string, mixed>
+     */
+    private function summarise(array $family): array
+    {
+        $count = count($family);
+
+        $travelling = 0;
+        $stationary = 0;
+        $offline = 0;
+
+        foreach ($family as $row) {
+            if (($row['presence']['state'] ?? null) === 'offline') {
+                $offline++;
+            }
+
+            match ($row['movement']) {
+                'travelling' => $travelling++,
+                'stationary' => $stationary++,
+                default => null,
+            };
+        }
+
+        /*
+         | One word per bucket, not two.
+         |
+         | A caption under each label was cut after laying the card out at
+         | 360dp: four buckets across a small phone leaves about 82dp each,
+         | and a second line of prose there is either illegible or it pushes
+         | the card over a third of the screen. The label carries it.
+         */
+        $buckets = [
+            [
+                'key' => 'members',
+                'label' => $count === 1 ? 'Member' : 'Members',
+                'count' => $count,
+                'icon' => 'group',
+            ],
+            [
+                'key' => 'stationary',
+                'label' => 'Stationary',
+                'count' => $stationary,
+                'icon' => 'home',
+            ],
+            [
+                'key' => 'travelling',
+                'label' => 'Travelling',
+                'count' => $travelling,
+                'icon' => 'car',
+            ],
+            [
+                'key' => 'offline',
+                'label' => 'Offline',
+                'count' => $offline,
+                'icon' => 'offline',
+            ],
+        ];
+
+        return [
+            'tone' => $count === 0 ? 'empty' : 'safe',
+            'headline' => $count === 0 ? 'No family yet' : 'All is good!',
+            'detail' => $count === 0
+                ? 'Add family members to see them here.'
+                : 'Your family is safe.',
+            'buckets' => $buckets,
         ];
     }
 
