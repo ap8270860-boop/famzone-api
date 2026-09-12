@@ -65,8 +65,29 @@ class LocationShareStarted implements ShouldBroadcast
     {
         $service = app(LocationService::class);
 
+        $sharer = $this->share->user ?? $this->share->user()->first();
+
         return [
             'share' => $service->presentShare($this->share),
+
+            /*
+             | Who, by name, in the event itself.
+             |
+             | The payload used to carry a share and a position and nothing
+             | about the person, which meant a client seeing somebody for the
+             | first time had to make a round trip before it could render
+             | anything — and a banner saying "somebody started sharing" while
+             | it waits is worse than no banner.
+             |
+             | Three fields, not a full profile. Enough for a banner and a
+             | marker; anything more belongs on the screen that opens next.
+             */
+            'user' => $sharer === null ? null : [
+                'id' => $sharer->uuid,
+                'name' => $sharer->name,
+                'username' => $sharer->username,
+                'avatar_url' => $sharer->avatar_url,
+            ],
 
             /*
              | The first position ships with the announcement.
