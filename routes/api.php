@@ -447,6 +447,30 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
                 ->name('pin');
 
             /*
+             | Family places — the named circles behind "At School".
+             |
+             | Declared before the {uuid} route below for the usual reason:
+             | `places` is a literal segment and would otherwise be eaten by
+             | the parameter, producing a 404 that looks like a missing
+             | endpoint and is actually a routing-order bug.
+             */
+            Route::get('places', [V1Controller::class, 'places'])
+                ->middleware('throttle:60,1')
+                ->name('places.index');
+
+            Route::post('places', [V1Controller::class, 'createPlace'])
+                ->middleware('throttle:30,1')
+                ->name('places.store');
+
+            Route::patch('places/{uuid}', [V1Controller::class, 'updatePlace'])
+                ->middleware('throttle:60,1')
+                ->name('places.update');
+
+            Route::delete('places/{uuid}', [V1Controller::class, 'deletePlace'])
+                ->middleware('throttle:30,1')
+                ->name('places.destroy');
+
+            /*
              | Last, so the literal segments above are not swallowed by
              | the parameter — the same ordering rule as users/search.
              */

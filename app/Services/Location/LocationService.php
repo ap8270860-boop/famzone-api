@@ -9,6 +9,7 @@ use App\Models\Block;
 use App\Models\Conversation;
 use App\Models\ConversationParticipant;
 use App\Models\FamilyMember;
+use App\Models\FamilyPlace;
 use App\Models\LocationPing;
 use App\Models\LocationShare;
 use App\Models\Message;
@@ -104,8 +105,10 @@ class LocationService
      */
     public const ONLINE_WITHIN_S = 300;
 
-    public function __construct(private readonly ChatService $chat)
-    {
+    public function __construct(
+        private readonly ChatService $chat,
+        private readonly FamilyPlaceService $places,
+    ) {
     }
 
     /*
@@ -430,6 +433,29 @@ class LocationService
             });
         }
 
+        if ($newest !== null) {
+            /*
+             | Geofences, after the write and only on a fix that survived the
+             | filters.
+             |
+             | Order matters twice over. After the transaction, because a
+             | geofence is a convenience and a position is the product — this
+             | must never be the thing that rolls a ping back. And only on an
+             | accepted fix, because feeding a rejected cell-tower reading in
+             | here is exactly how "Aarav arrived at School" fires from two
+             | kilometres away.
+             |
+             | Runs even when $broadcast is false: that flag is about the
+             | opening fix of a share not announcing itself twice, and it has
+             | nothing to say about whether somebody is standing in a circle.
+             */
+            $this->places->evaluate(
+                $me,
+                (float) $newest['latitude'],
+                (float) $newest['longitude'],
+            );
+        }
+
         if ($newest !== null && $broadcast) {
             /*
              | A dead socket must not fail a ping.
@@ -576,6 +602,10 @@ class LocationService
         return [
             'people' => $people,
             'family' => $family,
+            'places' => $this->places->forOwner($me)
+                ->map(fn ($place) => $this->places->present($place))
+                ->values()
+                ->all(),
             'status' => $this->summarise($family),
             'me' => [
                 'position' => $this->presentPosition($me),
@@ -607,8 +637,22 @@ class LocationService
     {
         $sharing = $visibleShares->groupBy(fn (LocationShare $share) => $share->user_id);
 
-        return $this->familyOf($me)
-            ->map(function (User $member) use ($sharing) {
+        $family = $this->familyOf($me);
+
+        /*
+         | Everybody's current place, in one query rather than one per member.
+         |
+         | This is the hottest read in the feature — every map refresh, for
+         | every member — and an N+1 here would be an N+1 on exactly the path
+         | that has to feel instant.
+         */
+        $inside = $this->places->currentPlaces(
+            $me,
+            $family->pluck('id')->all(),
+        );
+
+        return $family
+            ->map(function (User $member) use ($sharing, $inside) {
                 $shares = $sharing->get($member->id);
                 $visible = $shares !== null && $shares->isNotEmpty();
 
@@ -631,7 +675,26 @@ class LocationService
                      */
                     'position' => $visible ? $this->presentPosition($member) : null,
                     'presence' => $this->presence($member),
-                    'movement' => $visible ? $this->movementOf($member) : 'unknown',
+                    'movement' => $visible
+                        ? $this->movementOf($member, $inside[$member->id] ?? null)
+                        : 'unknown',
+
+                    /*
+                     | The place's own name, alongside the movement key.
+                     |
+                     | `movement` is a key the client switches on; this is the
+                     | words to print. Sending both means "At Nani's house"
+                     | renders correctly on a build that has never heard of a
+                     | place called that — which is every build, because
+                     | people name their own places.
+                     */
+                    'place' => ($visible && isset($inside[$member->id]))
+                        ? [
+                            'id' => $inside[$member->id]->uuid,
+                            'name' => $inside[$member->id]->name,
+                            'kind' => $inside[$member->id]->kind,
+                        ]
+                        : null,
                 ];
             })
             ->all();
@@ -676,7 +739,7 @@ class LocationService
      * string arrives. That is the point of computing it here: the card's
      * vocabulary can grow without a store release.
      */
-    private function movementOf(User $user): string
+    private function movementOf(User $user, ?FamilyPlace $inside = null): string
     {
         $at = $user->last_location_at;
 
@@ -686,6 +749,23 @@ class LocationService
 
         if (now()->diffInSeconds($at, true) > self::STALE_AFTER_S) {
             return 'stale';
+        }
+
+        /*
+         | A place beats a motion flag, even a moving one.
+         |
+         | Somebody walking around inside the school grounds reads as
+         | "travelling" to the accelerometer and as "at school" to anybody who
+         | asks where they are. The second answer is the one the question
+         | wanted, and a label that flips to "Travelling" because a child
+         | crossed a playground would make the feature look broken.
+         |
+         | The key is the place's kind, not its name: "home" is something the
+         | client can colour and icon, "Nani's house" is not. The name travels
+         | separately, in the roster's `place` block.
+         */
+        if ($inside !== null) {
+            return $inside->kind;
         }
 
         return $user->last_location_moving ? 'travelling' : 'stationary';
@@ -714,9 +794,37 @@ class LocationService
         $stationary = 0;
         $offline = 0;
 
+        /** @var array<string, array{label: string, count: int, kind: string}> $atPlace */
+        $atPlace = [];
+
         foreach ($family as $row) {
             if (($row['presence']['state'] ?? null) === 'offline') {
                 $offline++;
+            }
+
+            $place = $row['place'] ?? null;
+
+            if ($place !== null) {
+                /*
+                 | Grouped by name, not by kind.
+                 |
+                 | Two people at "Home" is one bucket reading 2. Two people at
+                 | two *different* homes — a parent's and a grandparent's,
+                 | both of kind `home` — is two buckets, because collapsing
+                 | them would produce "2 At Home" for a family that is in two
+                 | different houses, which is worse than no card at all.
+                 */
+                $key = $place['name'];
+
+                $atPlace[$key] ??= [
+                    'label' => 'At '.$place['name'],
+                    'count' => 0,
+                    'kind' => $place['kind'],
+                ];
+
+                $atPlace[$key]['count']++;
+
+                continue;
             }
 
             match ($row['movement']) {
@@ -733,33 +841,58 @@ class LocationService
          | 360dp: four buckets across a small phone leaves about 82dp each,
          | and a second line of prose there is either illegible or it pushes
          | the card over a third of the screen. The label carries it.
+         |
+         | Four buckets, and always exactly four. The card is a fixed row and
+         | a fifth would either wrap or shrink the other four; a third would
+         | leave a gap. So the first slot is always the headcount, and the
+         | remaining three are competed for.
          */
-        $buckets = [
-            [
+        $slots = [];
+
+        // Places first, biggest first: "2 At Home" is more informative than
+        // "2 Stationary", and it is the sentence somebody came here for.
+        uasort($atPlace, fn (array $a, array $b) => $b['count'] <=> $a['count']);
+
+        foreach ($atPlace as $bucket) {
+            $slots[] = [
+                'key' => $bucket['kind'],
+                'label' => $bucket['label'],
+                'count' => $bucket['count'],
+                'icon' => $bucket['kind'],
+            ];
+        }
+
+        /*
+         | Then the generic buckets, and only when they have somebody in them.
+         |
+         | A zero is not neutral on a safety card — "0 Travelling" invites the
+         | reader to work out whether that is good news, every single time
+         | they glance at it. An absent bucket asks nothing.
+         |
+         | Offline is the exception and is kept even at zero once there is
+         | room, because its zero *is* the reassurance: "nobody is offline" is
+         | the thing a parent is checking for.
+         */
+        foreach ([
+            ['key' => 'travelling', 'label' => 'Travelling', 'count' => $travelling, 'icon' => 'car'],
+            ['key' => 'stationary', 'label' => 'Stationary', 'count' => $stationary, 'icon' => 'home'],
+        ] as $bucket) {
+            if ($bucket['count'] > 0) {
+                $slots[] = $bucket;
+            }
+        }
+
+        $slots[] = ['key' => 'offline', 'label' => 'Offline', 'count' => $offline, 'icon' => 'offline'];
+
+        $buckets = array_merge(
+            [[
                 'key' => 'members',
                 'label' => $count === 1 ? 'Member' : 'Members',
                 'count' => $count,
                 'icon' => 'group',
-            ],
-            [
-                'key' => 'stationary',
-                'label' => 'Stationary',
-                'count' => $stationary,
-                'icon' => 'home',
-            ],
-            [
-                'key' => 'travelling',
-                'label' => 'Travelling',
-                'count' => $travelling,
-                'icon' => 'car',
-            ],
-            [
-                'key' => 'offline',
-                'label' => 'Offline',
-                'count' => $offline,
-                'icon' => 'offline',
-            ],
-        ];
+            ]],
+            array_slice($slots, 0, 3),
+        );
 
         return [
             'tone' => $count === 0 ? 'empty' : 'safe',

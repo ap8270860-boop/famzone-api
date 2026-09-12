@@ -20,6 +20,7 @@ use App\Http\Requests\Api\V1\Chat\StartConversationRequest;
 use App\Http\Requests\Api\V1\Chat\UploadRequest;
 use App\Http\Requests\Api\V1\Location\PinLocationRequest;
 use App\Http\Requests\Api\V1\Location\PingLocationRequest;
+use App\Http\Requests\Api\V1\Location\SavePlaceRequest;
 use App\Http\Requests\Api\V1\Location\ShareLocationRequest;
 use App\Http\Requests\Api\V1\Posts\CreatePostRequest;
 use App\Http\Requests\Api\V1\Profile\UpdateAvatarRequest;
@@ -46,6 +47,7 @@ use App\Services\Chat\PresenceService;
 use App\Services\Chat\ReactionService;
 use App\Services\Chat\ReceiptService;
 use App\Services\Chat\ThreadSettingsService;
+use App\Services\Location\FamilyPlaceService;
 use App\Services\Location\LocationService;
 use App\Services\Otp\Exceptions\OtpException;
 use App\Services\Otp\OtpService;
@@ -97,6 +99,11 @@ class V1Controller extends Controller
         private readonly ThreadSettingsService $threads,
         private readonly GroupService $groups,
         private readonly LocationService $locations,
+
+        // Family geofences. Not to be confused with $places below, which is
+        // the Google Places proxy — see FamilyPlaceService's own note.
+        private readonly FamilyPlaceService $familyPlaces,
+
         private readonly SosService $sos,
         private readonly PlacesService $places,
         private readonly EmergencyDirectory $directory,
@@ -1716,6 +1723,89 @@ class V1Controller extends Controller
             $uuid,
             $request->query('since'),
         ), 'OK');
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Family places
+    |--------------------------------------------------------------------------
+    |
+    | The named circles a person sets up — Home, School, the grandparents' —
+    | which turn "28.6139, 77.2090" into "At School" and fire an arrival when
+    | somebody crosses into one.
+    |
+    | Every route here is scoped to the caller's own places. A place belongs
+    | to whoever made it, and the labels somebody sees are computed against
+    | theirs; see the family_places migration for why that is the only
+    | coherent reading of a family graph with no family *group* in it.
+    */
+
+    /**
+     * GET /api/v1/location/places
+     *
+     * My own places. Also returned inside `location/live`, so the map does
+     * not need this call to draw — this one is for the manage screen.
+     */
+    public function places(Request $request): JsonResponse
+    {
+        return $this->ok([
+            'places' => $this->familyPlaces->forOwner($request->user())
+                ->map(fn ($place) => $this->familyPlaces->present($place))
+                ->values()
+                ->all(),
+        ], 'OK');
+    }
+
+    /**
+     * POST /api/v1/location/places
+     *
+     * Create one.
+     */
+    public function createPlace(SavePlaceRequest $request): JsonResponse
+    {
+        $place = $this->familyPlaces->save(
+            $request->user(),
+            null,
+            $request->validated(),
+        );
+
+        return $this->created(
+            ['place' => $this->familyPlaces->present($place)],
+            $place->name.' added.',
+        );
+    }
+
+    /**
+     * PATCH /api/v1/location/places/{uuid}
+     *
+     * Rename, move, or resize one.
+     *
+     * Moving or resizing closes every open visit inside it — see
+     * FamilyPlaceService::save. Without that, everybody who was standing in
+     * the old circle stays marked as inside it forever.
+     */
+    public function updatePlace(SavePlaceRequest $request, string $uuid): JsonResponse
+    {
+        $place = $this->familyPlaces->save(
+            $request->user(),
+            $uuid,
+            $request->validated(),
+        );
+
+        return $this->ok(
+            ['place' => $this->familyPlaces->present($place)],
+            $place->name.' updated.',
+        );
+    }
+
+    /**
+     * DELETE /api/v1/location/places/{uuid}
+     */
+    public function deletePlace(Request $request, string $uuid): JsonResponse
+    {
+        $this->familyPlaces->delete($request->user(), $uuid);
+
+        return $this->ok([], 'Place removed.');
     }
 
     /**
