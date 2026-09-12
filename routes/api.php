@@ -477,6 +477,24 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
             Route::get('{uuid}/trail', [V1Controller::class, 'locationTrail'])
                 ->middleware('throttle:60,1')
                 ->name('trail');
+
+            /*
+             | History. The longer, literal segment first — `history/days`
+             | would otherwise match `history` with a stray parameter on some
+             | route orderings, and the failure is a confusing 404 rather
+             | than a clean one.
+             |
+             | A day's timeline is expensive relative to everything else here
+             | (up to twenty thousand rows, simplified), so the throttle is
+             | set for somebody flicking through a week, not for polling.
+             */
+            Route::get('{uuid}/history/days', [V1Controller::class, 'locationHistoryDays'])
+                ->middleware('throttle:60,1')
+                ->name('history.days');
+
+            Route::get('{uuid}/history', [V1Controller::class, 'locationHistory'])
+                ->middleware('throttle:40,1')
+                ->name('history');
         });
 
 

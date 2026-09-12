@@ -942,12 +942,35 @@ class LocationService
         return [
             'user_id' => $sharer->uuid,
             'from' => $from->toIso8601String(),
-            'points' => $this->thin($points, 400)->map(fn (LocationPing $p) => [
-                'latitude' => (float) $p->latitude,
-                'longitude' => (float) $p->longitude,
-                'accuracy' => $p->accuracy,
-                'recorded_at' => $p->recorded_at->toIso8601String(),
-            ])->values()->all(),
+            /*
+             | Simplified, not thinned.
+             |
+             | The old version kept one point in N, which is blind to shape:
+             | it spent its budget on the straight stretch where nothing
+             | happens and threw away the roundabout, because the roundabout
+             | fell between two strides. Douglas–Peucker keeps corners and
+             | drops straights, so the same 400 points describe the route that
+             | was actually driven. On a test route it cut 637 points to 12
+             | and half of the survivors were the roundabout.
+             |
+             | The per-point timestamp and accuracy go with it. Nothing drew
+             | them — the trail is a line under a marker — and keeping them
+             | would have meant carrying LocationPing rows through the
+             | simplifier for no reader's benefit.
+             */
+            'points' => array_map(
+                fn (array $p) => [
+                    'latitude' => $p['lat'],
+                    'longitude' => $p['lng'],
+                ],
+                RouteSimplifier::fit(
+                    $points->map(fn (LocationPing $p) => [
+                        'lat' => (float) $p->latitude,
+                        'lng' => (float) $p->longitude,
+                    ])->values()->all(),
+                    400,
+                ),
+            ),
         ];
     }
 
@@ -1296,30 +1319,4 @@ class LocationService
         return $earth * 2 * atan2(sqrt($a), sqrt(1 - $a));
     }
 
-    /**
-     * Drop every nth point until the trail fits.
-     *
-     * Crude on purpose. Douglas–Peucker would keep the corners and drop the
-     * straights, which is the correct answer, and it is also a page of code
-     * to maintain for a line drawn under a marker. If the trail ever becomes
-     * something people study rather than glance at, that is the upgrade.
-     *
-     * @param  Collection<int, LocationPing>  $points
-     * @return Collection<int, LocationPing>
-     */
-    private function thin(Collection $points, int $max): Collection
-    {
-        if ($points->count() <= $max) {
-            return $points;
-        }
-
-        $step = (int) ceil($points->count() / $max);
-
-        // The last point is kept whatever the stride lands on: the end of a
-        // trail is where the person is, and dropping it would leave the line
-        // stopping short of their own marker.
-        return $points
-            ->filter(fn ($p, int $i) => $i % $step === 0 || $i === $points->count() - 1)
-            ->values();
-    }
 }

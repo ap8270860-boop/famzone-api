@@ -48,6 +48,7 @@ use App\Services\Chat\ReactionService;
 use App\Services\Chat\ReceiptService;
 use App\Services\Chat\ThreadSettingsService;
 use App\Services\Location\FamilyPlaceService;
+use App\Services\Location\LocationHistoryService;
 use App\Services\Location\LocationService;
 use App\Services\Otp\Exceptions\OtpException;
 use App\Services\Otp\OtpService;
@@ -103,6 +104,7 @@ class V1Controller extends Controller
         // Family geofences. Not to be confused with $places below, which is
         // the Google Places proxy — see FamilyPlaceService's own note.
         private readonly FamilyPlaceService $familyPlaces,
+        private readonly LocationHistoryService $history,
 
         private readonly SosService $sos,
         private readonly PlacesService $places,
@@ -1722,6 +1724,52 @@ class V1Controller extends Controller
             $request->user(),
             $uuid,
             $request->query('since'),
+        ), 'OK');
+    }
+
+    /**
+     * GET /api/v1/location/{uuid}/history?date=2026-09-11&offset=330
+     *
+     * One person's day as a timeline of stays and journeys.
+     *
+     * `offset` is minutes east of UTC, sent by the phone rather than read
+     * from a stored profile. The question is "what did Tuesday look like
+     * where I am now", and somebody reading this in a different timezone from
+     * the one they signed up in is asking about the day they are living in.
+     */
+    public function locationHistory(Request $request, string $uuid): JsonResponse
+    {
+        $validated = $request->validate([
+            'date' => ['required', 'date_format:Y-m-d'],
+            'offset' => ['nullable', 'integer', 'between:-840,840'],
+        ]);
+
+        return $this->ok($this->history->day(
+            $request->user(),
+            $uuid,
+            $validated['date'],
+            (int) ($validated['offset'] ?? 0),
+        ), 'OK');
+    }
+
+    /**
+     * GET /api/v1/location/{uuid}/history/days?month=2026-09&offset=330
+     *
+     * Which days in a month have anything recorded, so the calendar can mark
+     * them. One grouped query rather than thirty day requests.
+     */
+    public function locationHistoryDays(Request $request, string $uuid): JsonResponse
+    {
+        $validated = $request->validate([
+            'month' => ['required', 'date_format:Y-m'],
+            'offset' => ['nullable', 'integer', 'between:-840,840'],
+        ]);
+
+        return $this->ok($this->history->days(
+            $request->user(),
+            $uuid,
+            $validated['month'],
+            (int) ($validated['offset'] ?? 0),
         ), 'OK');
     }
 
