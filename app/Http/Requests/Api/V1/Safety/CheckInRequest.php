@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Api\V1\Safety;
 
+use App\Models\CheckInContact;
 use App\Models\SafetyCheckIn;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -42,6 +43,25 @@ class CheckInRequest extends FormRequest
 
             'device_type' => ['nullable', 'string', 'max:16'],
             'app_version' => ['nullable', 'string', 'max:32'],
+
+            /*
+             | Who to tell, in order — sent only on the very first check-in,
+             | where the client asks for the list and checks in with the same
+             | tap.
+             |
+             | Present means "save this as my list and use it". Absent means
+             | "use whatever I already have", which is the case on every later
+             | day. An explicitly empty array is meaningful too: it clears the
+             | list and makes the check-in private again.
+             |
+             | Membership is not validated here. Whether a uuid is accepted
+             | family is a question about two tables and a status, which
+             | belongs in the service that already has to ask it — and the
+             | right answer to a stale id is to drop it, not to fail the
+             | check-in.
+             */
+            'contacts' => ['sometimes', 'array', 'max:'.CheckInContact::MAX_CONTACTS],
+            'contacts.*' => ['string', 'uuid'],
         ];
     }
 
@@ -54,6 +74,8 @@ class CheckInRequest extends FormRequest
             'latitude.required_with' => 'Send both coordinates or neither.',
             'longitude.required_with' => 'Send both coordinates or neither.',
             'note.max' => 'Keep the note under 255 characters.',
+            'contacts.max' => 'You can choose up to '
+                .CheckInContact::MAX_CONTACTS.' people to notify.',
         ];
     }
 
@@ -66,8 +88,38 @@ class CheckInRequest extends FormRequest
      */
     public function checkInData(): array
     {
-        return array_merge($this->validated(), [
+        $data = $this->validated();
+
+        // The contact list is not a column on the check-in. It is handled
+        // alongside it and must not reach the row.
+        unset($data['contacts']);
+
+        return array_merge($data, [
             'source' => SafetyCheckIn::SOURCE_MANUAL,
         ]);
+    }
+
+    /**
+     * The ordered list, or null when the client did not send one.
+     *
+     * Null and [] are different answers and the caller has to be able to tell
+     * them apart: one means "leave my list alone", the other means "I want
+     * nobody notified".
+     *
+     * @return list<string>|null
+     */
+    public function contactOrder(): ?array
+    {
+        if (! $this->has('contacts')) {
+            return null;
+        }
+
+        /** @var array<int, mixed> $contacts */
+        $contacts = $this->validated()['contacts'] ?? [];
+
+        return array_values(array_filter(
+            $contacts,
+            static fn ($uuid) => is_string($uuid) && $uuid !== '',
+        ));
     }
 }

@@ -171,6 +171,41 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
         Route::prefix('safety')->name('safety.')->group(function () {
             Route::get('status', [V1Controller::class, 'safetyStatus'])->name('status');
 
+            /*
+             | The notification chain.
+             |
+             | Declared before `check-in` itself only for readability — there
+             | is no collision to avoid here, because every one of these is a
+             | literal segment under check-in/ and the POST below matches the
+             | bare path. The one real ordering rule in this group is inside
+             | requests/: `{uuid}/respond` has a parameter in it, and nothing
+             | literal may be declared after it.
+             |
+             | Contacts are read on every open of the picker and written once
+             | in a while, so the read gets the standard limit and the write a
+             | tighter one.
+             */
+            Route::get('check-in/contacts', [V1Controller::class, 'checkInContacts'])
+                ->name('check-in.contacts');
+
+            Route::put('check-in/contacts', [V1Controller::class, 'saveCheckInContacts'])
+                ->middleware('throttle:30,1')
+                ->name('check-in.contacts.save');
+
+            Route::get('check-in/requests', [V1Controller::class, 'checkInRequests'])
+                ->middleware('throttle:60,1')
+                ->name('check-in.requests');
+
+            /*
+             | Answering. Throttled like a human action rather than a poll —
+             | each accept ends somebody's chain and each decline moves it on,
+             | and neither is something a person does thirty times a minute.
+             */
+            Route::post('check-in/requests/{uuid}/respond', [V1Controller::class, 'respondToCheckIn'])
+                ->middleware('throttle:30,1')
+                ->where('uuid', '[0-9a-fA-F\\-]{36}')
+                ->name('check-in.respond');
+
             Route::post('check-in', [V1Controller::class, 'checkIn'])
                 ->middleware('throttle:20,1')
                 ->name('check-in');

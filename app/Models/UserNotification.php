@@ -24,6 +24,22 @@ class UserNotification extends Model
     public const FAMILY_INVITED = 'family.invited';
     public const FAMILY_ACCEPTED = 'family.accepted';
 
+    /**
+     * It is your turn to confirm somebody's daily check-in.
+     *
+     * The only notification in the system with a deadline on it: if it is not
+     * answered, the request moves to the next person on the list and this row
+     * stops being actionable — resolved, like every other action here, from
+     * the step it points at rather than from anything stored on the row.
+     */
+    public const CHECK_IN_REQUESTED = 'check_in.requested';
+
+    /** Somebody confirmed they know you are safe. */
+    public const CHECK_IN_ACKNOWLEDGED = 'check_in.acknowledged';
+
+    /** Your whole list was asked and nobody answered. */
+    public const CHECK_IN_UNANSWERED = 'check_in.unanswered';
+
     protected static function booted(): void
     {
         static::creating(function (self $notification) {

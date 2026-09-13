@@ -2,6 +2,7 @@
 
 namespace App\Services\Social;
 
+use App\Models\CheckInEscalationStep;
 use App\Models\FamilyMember;
 use App\Models\Follow;
 use App\Models\User;
@@ -190,6 +191,32 @@ class NotificationService
                 : null;
         }
 
+        /*
+         | A check-in waiting on this person.
+         |
+         | The same derived-not-stored rule as the two above, and the one place
+         | it earns its keep most obviously: this row can stop being actionable
+         | without anybody touching it. Half an hour passes, the sweep hands
+         | the request to the next person, and the Accept button here has to
+         | vanish — which it does, because nothing here remembers that it was
+         | ever offered. Reading isAwaitingResponse() at the moment the feed is
+         | built is the entire mechanism.
+         */
+        if ($subject instanceof CheckInEscalationStep) {
+            return $n->type === UserNotification::CHECK_IN_REQUESTED
+                && $subject->isAwaitingResponse()
+                    ? [
+                        'kind' => 'check_in_request',
+
+                        // The step, not the chain. A person answers for their
+                        // own place in the order and nothing else.
+                        'request_id' => $subject->uuid,
+                        'accept' => true,
+                        'decline' => true,
+                    ]
+                    : null;
+        }
+
         return null;
     }
 
@@ -203,6 +230,12 @@ class NotificationService
             UserNotification::FOLLOW_STARTED => $who.' started following you.',
             UserNotification::FAMILY_INVITED => $who.' wants to add you to their family.',
             UserNotification::FAMILY_ACCEPTED => $who.' joined your family.',
+            UserNotification::CHECK_IN_REQUESTED => $who
+                .' checked in safe today. Let them know you have seen it.',
+            UserNotification::CHECK_IN_ACKNOWLEDGED => $who
+                .' knows you are safe today.',
+            // No actor on this one — nobody did it, which is the news.
+            UserNotification::CHECK_IN_UNANSWERED => 'Nobody confirmed your check-in today.',
             default => 'You have a new notification.',
         };
     }

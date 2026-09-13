@@ -2,11 +2,14 @@
 
 namespace App\Services\Safety;
 
+use App\Models\CheckInContact;
+use App\Models\CheckInEscalation;
 use App\Models\SafetyCheckIn;
 use App\Models\User;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Everything the home screen's two safety cards are made of.
@@ -27,6 +30,11 @@ class SafetyService
     public const STATE_ATTENTION = 'attention';
     public const STATE_ALERT = 'alert';
 
+    public function __construct(
+        private readonly CheckInEscalationService $escalations,
+    ) {
+    }
+
     /*
     |--------------------------------------------------------------------------
     | Reads
@@ -45,6 +53,10 @@ class SafetyService
 
         $checkIn = $user->checkIns()
             ->where('check_in_date', $today)
+            // The chain travels with the check-in it belongs to. Eager loaded
+            // because the card draws all of it at once, and three round trips
+            // for four people is three too many.
+            ->with(['escalation.steps.contact', 'escalation.acknowledgedBy'])
             ->first();
 
         $reminder = $this->reminderMoment($user, $now);
@@ -90,6 +102,31 @@ class SafetyService
                 ],
 
                 'recent' => $this->recent($user, $now),
+
+                /*
+                 | Who gets told, in order.
+                 |
+                 | Sent on the status rather than left to the contacts
+                 | endpoint because the card shows the row of faces before
+                 | anybody has tapped anything, and a second request for ten
+                 | small objects to draw the thing already on screen is a
+                 | request that exists only because two endpoints were drawn
+                 | on a whiteboard separately.
+                 |
+                 | `configured` is what the button keys off: false means the
+                 | first tap opens the picker instead of checking in.
+                 */
+                'notify' => $this->notifyList($user),
+
+                /*
+                 | Today's chain, or null.
+                 |
+                 | Null in two quite different situations — no check-in yet,
+                 | and a check-in made with nobody on the list — and the card
+                 | does not need to tell them apart, because `done_today`
+                 | already does.
+                 */
+                'chain' => $this->escalations->present($checkIn?->escalation),
             ],
 
             // Circles are Phase 1 work. The shape is here so the client can
@@ -175,12 +212,41 @@ class SafetyService
      * violation the user would see as an error.
      *
      * @param  array<string, mixed>  $input
+     * @param  list<string>|null  $contactOrder  The ordered list to save first,
+     *                                           or null to keep the existing one.
      * @return array{created: bool, status: array<string, mixed>}
      */
-    public function checkIn(User $user, array $input, ?Request $request = null): array
-    {
+    public function checkIn(
+        User $user,
+        array $input,
+        ?Request $request = null,
+        ?array $contactOrder = null,
+    ): array {
         $now = $this->localNow($user);
         $today = $now->toDateString();
+
+        /*
+         | Save the list before writing the check-in, not after.
+         |
+         | The chain is built from whatever the list says at the moment the
+         | check-in lands, so on the first-ever check-in — where the picker and
+         | the tap are the same gesture — doing this second would start a chain
+         | from an empty list and notify nobody.
+         |
+         | Guarded, because the check-in is the part that must not fail. A list
+         | that would not save is a worse outcome than a private check-in, but
+         | it is a far better one than no check-in at all.
+         */
+        if ($contactOrder !== null) {
+            try {
+                $this->escalations->saveContacts($user, $contactOrder);
+            } catch (\Throwable $e) {
+                Log::error('check-in contact list save failed', [
+                    'user' => $user->uuid,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
 
         $created = DB::transaction(function () use ($user, $input, $request, $now, $today): bool {
             // Serialise concurrent check-ins for this user only.
@@ -232,6 +298,35 @@ class SafetyService
 
             return true;
         });
+
+        /*
+         | Start the chain, outside the transaction.
+         |
+         | Deliberately after the commit. Beginning a chain writes rows, sends
+         | websocket frames and touches the notification feed — none of which
+         | should be holding a row lock on the users table, and all of which
+         | must be free to fail without taking the check-in with them.
+         |
+         | Only on a first check-in of the day. A repeat tap returns the
+         | existing one and must not re-notify anybody; the unique index on
+         | safety_check_in_id would catch it anyway, but not doing it at all is
+         | cheaper and clearer.
+         */
+        if ($created) {
+            try {
+                $checkIn = $user->checkIns()->where('check_in_date', $today)->first();
+
+                if ($checkIn !== null) {
+                    $this->escalations->begin($user, $checkIn);
+                }
+            } catch (\Throwable $e) {
+                Log::error('check-in escalation failed to start', [
+                    'user' => $user->uuid,
+                    'date' => $today,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
 
         // Re-read so the payload reflects the write, including the counters
         // updated on the locked instance rather than on $user.
@@ -302,6 +397,42 @@ class SafetyService
     | Internals
     |--------------------------------------------------------------------------
     */
+
+    /**
+     * The ordered list of people a check-in will reach.
+     *
+     * A deliberately thin projection: the full picker payload, with everybody
+     * who *could* be added and the limits, lives on the contacts endpoint.
+     * What the home screen needs is the row of faces and whether the list
+     * exists at all.
+     *
+     * @return array<string, mixed>
+     */
+    private function notifyList(User $user): array
+    {
+        $rows = CheckInContact::query()
+            ->where('user_id', $user->id)
+            ->with('contact')
+            ->ordered()
+            ->get()
+            ->filter(fn (CheckInContact $row) => $row->contact !== null)
+            ->values();
+
+        return [
+            'configured' => $rows->isNotEmpty(),
+            'count' => $rows->count(),
+            'max' => CheckInContact::MAX_CONTACTS,
+            'timeout_minutes' => CheckInEscalation::DEFAULT_TIMEOUT_MINUTES,
+            'people' => $rows
+                ->map(fn (CheckInContact $row) => [
+                    'position' => $row->position,
+                    'id' => $row->contact->uuid,
+                    'name' => $row->contact->name,
+                    'avatar_url' => $row->contact->avatar_url,
+                ])
+                ->all(),
+        ];
+    }
 
     /**
      * "Now", in the user's own timezone.

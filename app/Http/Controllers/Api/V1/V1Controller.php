@@ -26,6 +26,7 @@ use App\Http\Requests\Api\V1\Posts\CreatePostRequest;
 use App\Http\Requests\Api\V1\Profile\UpdateAvatarRequest;
 use App\Http\Requests\Api\V1\Safety\CheckInRequest;
 use App\Http\Requests\Api\V1\Safety\NearbyPlacesRequest;
+use App\Http\Requests\Api\V1\Safety\SaveCheckInContactsRequest;
 use App\Http\Requests\Api\V1\Safety\StartSosRequest;
 use App\Http\Requests\Api\V1\Social\BlockRequest;
 use App\Http\Requests\Api\V1\Social\FamilyInviteRequest;
@@ -54,6 +55,7 @@ use App\Services\Otp\Exceptions\OtpException;
 use App\Services\Otp\OtpService;
 use App\Services\Posts\PostService;
 use App\Services\Profile\UsernameChecker;
+use App\Services\Safety\CheckInEscalationService;
 use App\Services\Safety\EmergencyDirectory;
 use App\Services\Safety\PlacesService;
 use App\Services\Safety\SafetyService;
@@ -87,6 +89,12 @@ class V1Controller extends Controller
         private readonly OtpService $otp,
         private readonly UsernameChecker $usernames,
         private readonly SafetyService $safety,
+
+        // The ordered "tell these people" chain behind a check-in. Separate
+        // from SafetyService because it is a different lifetime: a check-in is
+        // one instant, a chain runs for hours afterwards.
+        private readonly CheckInEscalationService $escalations,
+
         private readonly RelationshipService $relationships,
         private readonly NotificationService $notifier,
         private readonly BlockService $blocks,
@@ -562,6 +570,12 @@ class V1Controller extends Controller
      *
      * Returns the same payload as safetyStatus so the client replaces both
      * cards from this one response instead of re-fetching.
+     *
+     * May also carry `contacts` — the ordered list of family to notify. Sent
+     * on the first check-in, where choosing the list and checking in are one
+     * gesture, and on any later check-in where the user edited the order in
+     * the same sheet. Omitting it leaves the saved list alone, which is what
+     * every ordinary day looks like.
      */
     public function checkIn(CheckInRequest $request): JsonResponse
     {
@@ -569,13 +583,104 @@ class V1Controller extends Controller
             $request->user(),
             $request->checkInData(),
             $request,
+            $request->contactOrder(),
         );
+
+        $chain = $result['status']['check_in']['chain'] ?? null;
+        $notified = $chain['total_steps'] ?? 0;
 
         return $this->ok(
             $result['status'],
             $result['created']
-                ? "You're marked safe for today."
+                ? ($notified > 0
+                    // Named rather than counted where it is one person: "1
+                    // person will be told" is a sentence no human writes.
+                    ? "You're marked safe. Letting your family know."
+                    : "You're marked safe for today.")
                 : "You've already checked in today.",
+        );
+    }
+
+    /**
+     * GET /api/v1/safety/check-in/contacts
+     *
+     * The picker, in one request: the ordered list as it stands, everybody who
+     * could be added, and the limits.
+     */
+    public function checkInContacts(Request $request): JsonResponse
+    {
+        return $this->ok($this->escalations->contacts($request->user()), 'OK');
+    }
+
+    /**
+     * PUT /api/v1/safety/check-in/contacts
+     *
+     * Replaces the list wholesale — the array's order is the notification
+     * order. See SaveCheckInContactsRequest for why there is no position
+     * field, and CheckInEscalationService::saveContacts for why unknown ids
+     * are dropped rather than rejected.
+     *
+     * PUT rather than POST because it is idempotent by construction: sending
+     * the same list twice leaves the same list.
+     */
+    public function saveCheckInContacts(SaveCheckInContactsRequest $request): JsonResponse
+    {
+        $contacts = $this->escalations->saveContacts(
+            $request->user(),
+            $request->contactOrder(),
+        );
+
+        return $this->ok(
+            $contacts,
+            $contacts['configured']
+                ? 'Saved. Your family will be told in this order.'
+                : 'Saved. Your check-ins stay private.',
+        );
+    }
+
+    /**
+     * GET /api/v1/safety/check-in/requests
+     *
+     * Check-ins waiting on *this* user's confirmation.
+     *
+     * Separate from the notification feed on purpose. The feed is a history
+     * that happens to contain some actionable rows; this is a short list of
+     * things somebody is actively waiting on an answer for, and the banner
+     * that appears on app resume is built from it. Asking the feed the same
+     * question would mean paging through follow requests from March.
+     */
+    public function checkInRequests(Request $request): JsonResponse
+    {
+        return $this->ok($this->escalations->awaiting($request->user()), 'OK');
+    }
+
+    /**
+     * POST /api/v1/safety/check-in/requests/{uuid}/respond
+     *
+     * Accept — "I know you are safe" — stops the chain and nobody further down
+     * the list is ever told. Decline hands it straight to the next person
+     * rather than making them wait out the timer.
+     *
+     * Never fails for being late. A step that has already closed returns 200
+     * with a sentence explaining what happened to it, because by the time a
+     * slow phone's tap arrives the request may genuinely have moved on, and
+     * "Vinod already confirmed" is the true and useful answer — not an error.
+     */
+    public function respondToCheckIn(RespondRequest $request, string $uuid): JsonResponse
+    {
+        $result = $this->escalations->respond(
+            $request->user(),
+            $uuid,
+            $request->wasAccepted(),
+        );
+
+        return $this->ok(
+            [
+                'changed' => $result['changed'],
+                'chain' => $result['chain'],
+                'awaiting' => $this->escalations->awaiting($request->user()),
+            ],
+            $result['message'],
         );
     }
 

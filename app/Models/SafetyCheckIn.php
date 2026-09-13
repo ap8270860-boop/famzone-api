@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Support\Str;
 
 /**
@@ -13,6 +14,8 @@ use Illuminate\Support\Str;
  *
  * Immutable by intent: a check-in records what somebody said at a moment in
  * time. Correcting one means adding another row, never editing this one.
+ *
+ * @property-read CheckInEscalation|null $escalation
  */
 #[Fillable([
     'check_in_date', 'checked_in_at', 'status', 'source', 'note',
@@ -57,6 +60,21 @@ class SafetyCheckIn extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    /**
+     * The notification chain this check-in set off, if it set one off.
+     *
+     * HasOne and not HasMany — the unique index on safety_check_in_id makes
+     * that a database guarantee rather than a convention, so a check-in can
+     * never end up with two rounds of notifications going out to the same
+     * family for the same day.
+     *
+     * @return HasOne<CheckInEscalation, SafetyCheckIn>
+     */
+    public function escalation(): HasOne
+    {
+        return $this->hasOne(CheckInEscalation::class, 'safety_check_in_id');
     }
 
     public function isSafe(): bool
