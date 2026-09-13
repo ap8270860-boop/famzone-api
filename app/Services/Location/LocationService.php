@@ -180,6 +180,14 @@ class LocationService
      */
     public const MOVING_BASELINE_S = 20;
 
+    /**
+     * And the oldest an anchor may be.
+     *
+     * Beyond this the comparison stops describing anything: a fix five hours
+     * after the last one is not evidence about the last twenty seconds.
+     */
+    public const MOVING_MAX_BASELINE_S = 180;
+
     /** How long a fix stays "live" on a map before it is drawn as stale. */
     public const STALE_AFTER_S = 180;
 
@@ -518,44 +526,7 @@ class LocationService
         $moving = (bool) $me->last_location_moving;
 
         if ($newest !== null) {
-            $anchorLat = $me->last_latitude !== null ? (float) $me->last_latitude : null;
-            $anchorLng = $me->last_longitude !== null ? (float) $me->last_longitude : null;
-            $anchorAt = $me->last_location_at;
-
-            $accuracy = $newest['accuracy'] === null
-                ? null
-                : (float) $newest['accuracy'];
-
-            $usable = $anchorLat !== null
-                && $anchorLng !== null
-                && $anchorAt !== null
-                && ($accuracy === null || $accuracy <= self::MOVING_MAX_ACCURACY_M);
-
-            if ($usable) {
-                $elapsed = CarbonImmutable::parse($newest['recorded_at'])
-                    ->getTimestamp() - CarbonImmutable::instance($anchorAt)->getTimestamp();
-
-                if ($elapsed >= self::MOVING_BASELINE_S) {
-                    $travelled = $this->metresBetween(
-                        $anchorLat,
-                        $anchorLng,
-                        (float) $newest['latitude'],
-                        (float) $newest['longitude'],
-                    );
-
-                    $needed = max(
-                        self::MOVING_MIN_METRES,
-                        self::MOVING_ACCURACY_FACTOR * ($accuracy ?? 0.0),
-                    );
-
-                    $moving = $travelled >= $needed
-                        && ($travelled / $elapsed) >= self::MOVING_SPEED_MS;
-                }
-
-                // Below the baseline the previous verdict stands. A phone
-                // flushing every few seconds must not be re-judged on every
-                // flush over a window too short to judge anything.
-            }
+            $moving = $this->judgeMovement($me, $newest, $moving);
         }
 
         if ($newest !== null) {
@@ -698,6 +669,73 @@ class LocationService
     | Reading
     |--------------------------------------------------------------------------
     */
+
+    /**
+     * Is this person moving?
+     *
+     * ## Why the anchor is fetched rather than read off the user row
+     *
+     * The first version compared the newest fix against `users.last_*`, which
+     * looked right and never fired. The client flushes its buffer every
+     * twelve seconds, so `last_location_at` is *always* about twelve seconds
+     * old — never the twenty the baseline needs — and the verdict simply kept
+     * whatever value it already had, for ever. Somebody could walk across a
+     * city and stay marked stationary.
+     *
+     * So the anchor comes from the trail instead: the most recent ping at
+     * least the baseline old. One indexed lookup on `(user_id, recorded_at)`,
+     * on a path that runs a few times a minute per sharing user.
+     *
+     * The upper bound matters too. Without it, somebody whose first fix of
+     * the day lands five hours after their last is compared against
+     * yesterday — an enormous displacement over an enormous time, which
+     * divides out to a crawl and marks a person starting a journey as
+     * stationary.
+     *
+     * @param  array<string, mixed>  $newest
+     */
+    private function judgeMovement(User $me, array $newest, bool $previous): bool
+    {
+        $accuracy = $newest['accuracy'] === null ? null : (float) $newest['accuracy'];
+
+        // A fix you cannot trust votes on nothing — guessing from noise is how
+        // a stationary phone talks itself into the five-second plan.
+        if ($accuracy !== null && $accuracy > self::MOVING_MAX_ACCURACY_M) {
+            return $previous;
+        }
+
+        $at = CarbonImmutable::parse($newest['recorded_at']);
+
+        $anchor = LocationPing::query()
+            ->where('user_id', $me->id)
+            ->where('recorded_at', '<=', $at->subSeconds(self::MOVING_BASELINE_S))
+            ->where('recorded_at', '>=', $at->subSeconds(self::MOVING_MAX_BASELINE_S))
+            ->orderByDesc('recorded_at')
+            ->first(['latitude', 'longitude', 'recorded_at']);
+
+        if ($anchor === null) {
+            // No usable history — the opening minute of a share. The phone's
+            // own belief is the only evidence there is.
+            return (bool) ($newest['moving'] ?? $previous);
+        }
+
+        $elapsed = max(1, $at->getTimestamp() - $anchor->recorded_at->getTimestamp());
+
+        $travelled = $this->metresBetween(
+            (float) $anchor->latitude,
+            (float) $anchor->longitude,
+            (float) $newest['latitude'],
+            (float) $newest['longitude'],
+        );
+
+        $needed = max(
+            self::MOVING_MIN_METRES,
+            self::MOVING_ACCURACY_FACTOR * ($accuracy ?? 0.0),
+        );
+
+        return $travelled >= $needed
+            && ($travelled / $elapsed) >= self::MOVING_SPEED_MS;
+    }
 
     /**
      * The whole map, in one response.
