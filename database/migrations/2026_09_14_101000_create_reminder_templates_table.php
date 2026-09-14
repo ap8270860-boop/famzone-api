@@ -63,7 +63,26 @@ return new class extends Migration
             $table->timestamps();
 
             $table->unique(['reminder_category_id', 'key']);
-            $table->index(['reminder_category_id', 'is_active', 'sort_order']);
+
+            /*
+             | Named by hand, and it has to be.
+             |
+             | Laravel derives an index name from the table and every column in
+             | it — here that is
+             | `reminder_templates_reminder_category_id_is_active_sort_order_index`,
+             | which is 66 characters against MySQL's limit of 64. The failure
+             | is nastier than it looks: the CREATE TABLE succeeds and the
+             | ALTER that adds the index is what blows up, so the table exists
+             | while the migration is not recorded, and the next `migrate` run
+             | fails with "table already exists" instead of the real error.
+             |
+             | The rule of thumb is that four-part names on a table whose own
+             | name is long will not fit, so they get named explicitly.
+             */
+            $table->index(
+                ['reminder_category_id', 'is_active', 'sort_order'],
+                'reminder_templates_picker_index',
+            );
         });
     }
 
