@@ -16,7 +16,25 @@ use Illuminate\Support\Str;
  *
  * @property-read Reminder $reminder
  */
-#[Fillable(['due_on', 'due_at', 'status', 'completed_at', 'snoozed_until'])]
+/*
+ | Both foreign keys are fillable, deliberately.
+ |
+ | Every row in this table is written by ReminderService — through
+ | updateOrCreate when somebody answers an occurrence, and through create when
+ | the nightly close-out writes off a day that went unanswered. Both build
+ | their arrays from $reminder->id and $user->id, which are resolved from a
+ | route binding and the authenticated user long before they reach here. No
+ | request array is ever handed to this model.
+ |
+ | So leaving them out guarded nothing. It only meant Eloquent quietly dropped
+ | them on the way through fill() and handed MySQL an insert with no
+ | reminder_id — which is error 1364, and which does not appear until the first
+ | time somebody actually answers a reminder.
+ */
+#[Fillable([
+    'reminder_id', 'user_id',
+    'due_on', 'due_at', 'status', 'completed_at', 'snoozed_until',
+])]
 class ReminderOccurrence extends Model
 {
     public const STATUS_DONE = 'done';
