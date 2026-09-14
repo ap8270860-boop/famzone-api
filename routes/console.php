@@ -40,6 +40,21 @@ Schedule::command('check-ins:escalate')
     ->runInBackground();
 
 /*
+ | Write off reminders that came due and were never answered.
+ |
+ | Hourly rather than nightly, and the reason is timezones. There is no
+ | single midnight: Auckland and Los Angeles are twenty-one hours apart,
+ | so a job on server time closes one of them a day early and the other
+ | most of a day late. Hourly with a six-hour grace period lets every
+ | zone's day end on its own schedule, and the unique index on
+ | (reminder_id, due_at) makes the repeated passes free.
+ */
+Schedule::command('reminders:close-day')
+    ->hourly()
+    ->withoutOverlapping()
+    ->runInBackground();
+
+/*
  | Trim location history.
  |
  | 03:20 rather than 03:00: the hour is for backups and every other

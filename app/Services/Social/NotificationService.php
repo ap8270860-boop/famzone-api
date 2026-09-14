@@ -5,6 +5,7 @@ namespace App\Services\Social;
 use App\Models\CheckInEscalationStep;
 use App\Models\FamilyMember;
 use App\Models\Follow;
+use App\Models\Reminder;
 use App\Models\User;
 use App\Models\UserNotification;
 use Illuminate\Database\Eloquent\Model;
@@ -217,6 +218,26 @@ class NotificationService
                     : null;
         }
 
+        /*
+         | A reminder waiting to be accepted onto somebody's phone.
+         |
+         | Derived from the reminder's own assignment status, like everything
+         | else here. It stops being actionable the moment it is answered from
+         | the reminders screen — and that is the common path, because the
+         | card there is far more informative than a feed row.
+         */
+        if ($subject instanceof Reminder) {
+            return $n->type === UserNotification::REMINDER_ASSIGNED
+                && $subject->isAwaitingAnswer()
+                    ? [
+                        'kind' => 'reminder_assignment',
+                        'request_id' => $subject->uuid,
+                        'accept' => true,
+                        'decline' => true,
+                    ]
+                    : null;
+        }
+
         return null;
     }
 
@@ -236,6 +257,10 @@ class NotificationService
                 .' knows you are safe today.',
             // No actor on this one — nobody did it, which is the news.
             UserNotification::CHECK_IN_UNANSWERED => 'Nobody confirmed your check-in today.',
+            UserNotification::REMINDER_ASSIGNED => $who.' set a reminder for you.',
+            UserNotification::REMINDER_ACCEPTED => $who.' accepted your reminder.',
+            UserNotification::REMINDER_DECLINED => $who.' declined your reminder.',
+            UserNotification::REMINDER_DONE => $who.' did it.',
             default => 'You have a new notification.',
         };
     }

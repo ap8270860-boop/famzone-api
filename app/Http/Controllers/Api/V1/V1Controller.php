@@ -24,6 +24,7 @@ use App\Http\Requests\Api\V1\Location\SavePlaceRequest;
 use App\Http\Requests\Api\V1\Location\ShareLocationRequest;
 use App\Http\Requests\Api\V1\Posts\CreatePostRequest;
 use App\Http\Requests\Api\V1\Profile\UpdateAvatarRequest;
+use App\Http\Requests\Api\V1\Reminders\SaveReminderRequest;
 use App\Http\Requests\Api\V1\Safety\CheckInRequest;
 use App\Http\Requests\Api\V1\Safety\NearbyPlacesRequest;
 use App\Http\Requests\Api\V1\Safety\SaveCheckInContactsRequest;
@@ -55,6 +56,7 @@ use App\Services\Otp\Exceptions\OtpException;
 use App\Services\Otp\OtpService;
 use App\Services\Posts\PostService;
 use App\Services\Profile\UsernameChecker;
+use App\Services\Reminders\ReminderService;
 use App\Services\Safety\CheckInEscalationService;
 use App\Services\Safety\EmergencyDirectory;
 use App\Services\Safety\PlacesService;
@@ -113,6 +115,10 @@ class V1Controller extends Controller
         // the Google Places proxy — see FamilyPlaceService's own note.
         private readonly FamilyPlaceService $familyPlaces,
         private readonly LocationHistoryService $history,
+
+        // Reminders. Nothing in this service makes a phone ring — the device
+        // reads these rows and registers real OS alarms against them.
+        private readonly ReminderService $reminders,
 
         private readonly SosService $sos,
         private readonly PlacesService $places,
@@ -696,6 +702,195 @@ class V1Controller extends Controller
         $days = max(1, min(365, $days));
 
         return $this->ok($this->safety->history($request->user(), $days), 'OK');
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Reminders
+    |--------------------------------------------------------------------------
+    |
+    | One rule runs through all of these: nothing here makes a phone ring.
+    | The device reads these rows and registers real OS alarms against them,
+    | which is why a reminder fires on a plane, in a lift, with the app
+    | force-closed and this server switched off.
+    |
+    */
+
+    /**
+     * GET /api/v1/reminders/catalogue
+     *
+     * The twelve categories and their presets. Seeded data, identical for
+     * every account, cached for an hour — which is why it is a separate
+     * endpoint from the reminders themselves rather than riding along with
+     * them on every open.
+     */
+    public function reminderCatalogue(): JsonResponse
+    {
+        return $this->ok($this->reminders->catalogue(), 'OK');
+    }
+
+    /**
+     * GET /api/v1/reminders
+     *
+     * Mine to do, what I set for other people, today's list, and the concrete
+     * moments this phone should schedule — in one response, because the four
+     * have to agree with each other. A list that disagrees with the schedule
+     * is a reminder that shows on screen and never rings.
+     */
+    public function reminders(Request $request): JsonResponse
+    {
+        return $this->ok($this->reminders->overview($request->user()), 'OK');
+    }
+
+    /**
+     * GET /api/v1/reminders/schedule
+     *
+     * Just the alarms, for a client topping up its OS registrations without
+     * wanting the rest. Cheaper than the overview and safe to call on every
+     * resume.
+     */
+    public function reminderSchedule(Request $request): JsonResponse
+    {
+        return $this->ok(
+            ['schedule' => $this->reminders->schedule($request->user())],
+            'OK',
+        );
+    }
+
+    /**
+     * GET /api/v1/reminders/day?date=YYYY-MM-DD
+     *
+     * One day of the calendar: what was due and what came of it. Future days
+     * are expanded from the rules; past days come from the settled rows, so
+     * history does not change when a schedule is edited.
+     */
+    public function reminderDay(Request $request): JsonResponse
+    {
+        $date = (string) $request->query(
+            'date',
+            now()->toDateString(),
+        );
+
+        // Validated by parsing rather than by a rule, so a nonsense date is a
+        // 422 with a sentence instead of a 500 from inside Carbon.
+        abort_unless(
+            (bool) preg_match('/^\d{4}-\d{2}-\d{2}$/', $date),
+            422,
+            'Send the date as YYYY-MM-DD.',
+        );
+
+        return $this->ok($this->reminders->day($request->user(), $date), 'OK');
+    }
+
+    /**
+     * GET /api/v1/reminders/score?days=30
+     *
+     * Adherence and the streak. Skipped occurrences are in neither half of
+     * the fraction — deciding not to go to the gym on a rest day is not a
+     * failure, and counting it as one teaches people to ignore the reminder
+     * rather than answer it honestly.
+     */
+    public function reminderScore(Request $request): JsonResponse
+    {
+        return $this->ok(
+            $this->reminders->score(
+                $request->user(),
+                (int) $request->integer('days', 30),
+            ),
+            'OK',
+        );
+    }
+
+    /**
+     * POST /api/v1/reminders
+     */
+    public function createReminder(SaveReminderRequest $request): JsonResponse
+    {
+        return $this->ok(
+            $this->reminders->save($request->user(), $request->reminderData()),
+            'Reminder saved.',
+        );
+    }
+
+    /**
+     * PUT /api/v1/reminders/{uuid}
+     *
+     * Either end may edit — the person it rings for as much as the person who
+     * set it. An alarm you cannot silence on your own phone is not a
+     * reminder, it is somebody else's control panel.
+     */
+    public function updateReminder(SaveReminderRequest $request, string $uuid): JsonResponse
+    {
+        return $this->ok(
+            $this->reminders->save($request->user(), $request->reminderData(), $uuid),
+            'Reminder updated.',
+        );
+    }
+
+    /**
+     * DELETE /api/v1/reminders/{uuid}
+     *
+     * Archives rather than deletes. The occurrences hanging off a reminder are
+     * somebody's medicine history, and cascading them away because a reminder
+     * was tidied up is a data loss nobody asks for and nobody can undo.
+     */
+    public function deleteReminder(Request $request, string $uuid): JsonResponse
+    {
+        $this->reminders->destroy($request->user(), $uuid);
+
+        return $this->ok(['id' => $uuid], 'Reminder removed.');
+    }
+
+    /**
+     * POST /api/v1/reminders/{uuid}/respond
+     *
+     * Accept or decline a reminder somebody set for you. Until it is
+     * accepted it does not ring: another person putting an alarm on your
+     * phone is a request, not a fact.
+     */
+    public function respondToReminder(RespondRequest $request, string $uuid): JsonResponse
+    {
+        $result = $this->reminders->respondToAssignment(
+            $request->user(),
+            $uuid,
+            $request->wasAccepted(),
+        );
+
+        return $this->ok(
+            [
+                'changed' => $result['changed'],
+                'reminder' => $result['reminder'],
+            ],
+            $result['message'],
+        );
+    }
+
+    /**
+     * POST /api/v1/reminders/{uuid}/occurrences
+     *
+     * Mark one occurrence done, snoozed or skipped.
+     *
+     * The occurrence is identified by its due instant rather than by an id,
+     * because it usually does not exist yet — the future is computed, and the
+     * row is written by this call at the moment somebody has an opinion about
+     * it.
+     */
+    public function settleReminder(Request $request, string $uuid): JsonResponse
+    {
+        $dueAt = (string) $request->input('due_at', '');
+        $status = (string) $request->input('status', '');
+
+        abort_if($dueAt === '', 422, 'Say which occurrence.');
+
+        return $this->ok(
+            $this->reminders->settle($request->user(), $uuid, $dueAt, $status),
+            match ($status) {
+                'done' => 'Marked done.',
+                'snoozed' => 'Snoozed.',
+                'skipped' => 'Skipped.',
+                default => 'OK',
+            },
+        );
     }
 
     /*

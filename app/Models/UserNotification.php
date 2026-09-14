@@ -40,6 +40,26 @@ class UserNotification extends Model
     /** Your whole list was asked and nobody answered. */
     public const CHECK_IN_UNANSWERED = 'check_in.unanswered';
 
+    /**
+     * Somebody put a reminder on your phone.
+     *
+     * Actionable until answered, and resolved from the reminder's own
+     * assignment status rather than stored here — the same rule as every
+     * other request in this feed.
+     */
+    public const REMINDER_ASSIGNED = 'reminder.assigned';
+
+    public const REMINDER_ACCEPTED = 'reminder.accepted';
+    public const REMINDER_DECLINED = 'reminder.declined';
+
+    /**
+     * They did the thing you reminded them to do.
+     *
+     * The payoff for assigning a reminder at all: "Dad took his tablet" is
+     * the whole reason a daughter sets one on her father's phone.
+     */
+    public const REMINDER_DONE = 'reminder.done';
+
     protected static function booted(): void
     {
         static::creating(function (self $notification) {

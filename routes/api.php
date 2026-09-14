@@ -216,6 +216,69 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
         });
 
         /*
+         | Reminders.
+         |
+         | Ordering matters and is the usual rule: every literal segment
+         | before anything with a parameter in it, or `catalogue` is
+         | swallowed by `{uuid}` and the picker 404s on a word.
+         |
+         | `catalogue` is seeded data cached for an hour and identical for
+         | every account, so it gets a generous limit. The rest are ordinary
+         | reads and human-paced writes.
+         */
+        Route::prefix('reminders')->name('reminders.')->group(function () {
+            Route::get('catalogue', [V1Controller::class, 'reminderCatalogue'])
+                ->middleware('throttle:120,1')
+                ->name('catalogue');
+
+            Route::get('schedule', [V1Controller::class, 'reminderSchedule'])
+                ->middleware('throttle:60,1')
+                ->name('schedule');
+
+            Route::get('day', [V1Controller::class, 'reminderDay'])
+                ->middleware('throttle:120,1')
+                ->name('day');
+
+            Route::get('score', [V1Controller::class, 'reminderScore'])
+                ->middleware('throttle:60,1')
+                ->name('score');
+
+            Route::get('/', [V1Controller::class, 'reminders'])->name('index');
+
+            Route::post('/', [V1Controller::class, 'createReminder'])
+                ->middleware('throttle:40,1')
+                ->name('store');
+
+            /*
+             | Parameterised, and therefore last.
+             |
+             | `occurrences` is throttled highest of the three: marking doses
+             | done is the thing somebody does several times a day, and a
+             | medicine reminder with three occurrences is three taps before
+             | breakfast.
+             */
+            Route::put('{uuid}', [V1Controller::class, 'updateReminder'])
+                ->middleware('throttle:40,1')
+                ->where('uuid', '[0-9a-fA-F\\-]{36}')
+                ->name('update');
+
+            Route::delete('{uuid}', [V1Controller::class, 'deleteReminder'])
+                ->middleware('throttle:40,1')
+                ->where('uuid', '[0-9a-fA-F\\-]{36}')
+                ->name('destroy');
+
+            Route::post('{uuid}/respond', [V1Controller::class, 'respondToReminder'])
+                ->middleware('throttle:40,1')
+                ->where('uuid', '[0-9a-fA-F\\-]{36}')
+                ->name('respond');
+
+            Route::post('{uuid}/occurrences', [V1Controller::class, 'settleReminder'])
+                ->middleware('throttle:120,1')
+                ->where('uuid', '[0-9a-fA-F\\-]{36}')
+                ->name('occurrences');
+        });
+
+        /*
          | SOS.
          |
          | `sos` is the screen, cold: the catalogue of services and
