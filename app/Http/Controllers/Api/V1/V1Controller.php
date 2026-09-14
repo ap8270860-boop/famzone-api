@@ -783,6 +783,27 @@ class V1Controller extends Controller
     }
 
     /**
+     * GET /api/v1/reminders/month?month=YYYY-MM
+     *
+     * A month of squares for the calendar: counts and a state per day, not the
+     * occurrences themselves. Tapping a square calls the day endpoint for the
+     * detail — a month of a busy user is several hundred items and the grid
+     * draws a dot.
+     */
+    public function reminderMonth(Request $request): JsonResponse
+    {
+        $month = (string) $request->query('month', now()->format('Y-m'));
+
+        abort_unless(
+            (bool) preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $month),
+            422,
+            'Send the month as YYYY-MM.',
+        );
+
+        return $this->ok($this->reminders->month($request->user(), $month), 'OK');
+    }
+
+    /**
      * GET /api/v1/reminders/score?days=30
      *
      * Adherence and the streak. Skipped occurrences are in neither half of

@@ -239,6 +239,10 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
                 ->middleware('throttle:120,1')
                 ->name('day');
 
+            Route::get('month', [V1Controller::class, 'reminderMonth'])
+                ->middleware('throttle:120,1')
+                ->name('month');
+
             Route::get('score', [V1Controller::class, 'reminderScore'])
                 ->middleware('throttle:60,1')
                 ->name('score');

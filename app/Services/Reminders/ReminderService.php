@@ -321,6 +321,144 @@ class ReminderService
         ];
     }
 
+    /**
+     * A whole month, as the calendar grid draws it.
+     *
+     * One row per day with counts, not the full list of occurrences — a month
+     * of a busy user is several hundred items and the grid draws a dot, not a
+     * title. Tapping a square calls day() for the detail.
+     *
+     * Two queries regardless of how many days or reminders are involved: the
+     * settled rows in one go, and the active rules once. Everything else is
+     * arithmetic.
+     *
+     * @return array<string, mixed>
+     */
+    public function month(User $user, string $month): array
+    {
+        $zone = Recurrence::safeZone($user->timezone);
+
+        $start = CarbonImmutable::createFromFormat('Y-m-d H:i:s', $month.'-01 00:00:00', $zone);
+
+        if ($start === false) {
+            abort(422, 'Send the month as YYYY-MM.');
+        }
+
+        $start = $start->startOfMonth();
+        $end = $start->endOfMonth();
+        $today = CarbonImmutable::now($zone)->startOfDay();
+
+        /*
+         | Settled outcomes for the month, counted per day in PHP rather than
+         | with a GROUP BY.
+         |
+         | The row count here is bounded by what one person actually did in a
+         | month — hundreds at the very most — and counting them in memory
+         | keeps this a plain indexed range scan instead of an aggregate the
+         | query planner has to think about.
+         */
+        $settled = ReminderOccurrence::query()
+            ->between($user->id, $start->toDateString(), $end->toDateString())
+            ->get(['due_on', 'status'])
+            ->groupBy(fn (ReminderOccurrence $o) => $o->due_on->toDateString());
+
+        $reminders = Reminder::query()
+            ->ringingFor($user->id)
+            ->get();
+
+        $days = [];
+        $monthDone = 0;
+        $monthCounted = 0;
+
+        for ($day = $start; $day->lessThanOrEqualTo($end); $day = $day->addDay()) {
+            $date = $day->toDateString();
+            $rows = $settled->get($date);
+
+            // How many the rules say were due, whether or not anything was
+            // recorded. This is what makes an untouched past day read as
+            // missed before the hourly close-out has caught up with it.
+            $due = 0;
+
+            foreach ($reminders as $reminder) {
+                if ($reminder->rule()->occursOn($day)) {
+                    $due++;
+                }
+            }
+
+            $done = $rows?->where('status', ReminderOccurrence::STATUS_DONE)->count() ?? 0;
+            $missed = $rows?->where('status', ReminderOccurrence::STATUS_MISSED)->count() ?? 0;
+            $skipped = $rows?->where('status', ReminderOccurrence::STATUS_SKIPPED)->count() ?? 0;
+
+            $counted = $done + $missed;
+
+            $monthDone += $done;
+            $monthCounted += $counted;
+
+            $future = $day->greaterThan($today);
+
+            $days[] = [
+                'date' => $date,
+                'day' => $day->day,
+
+                /*
+                 | ISO weekday, so the client can offset the first row without
+                 | reimplementing calendar arithmetic — and without the
+                 | Sunday-or-Monday ambiguity that Carbon's own dayOfWeek has
+                 | moved on between versions.
+                 */
+                'weekday' => $day->dayOfWeekIso,
+
+                'due' => $due,
+                'done' => $done,
+                'missed' => $missed,
+                'skipped' => $skipped,
+
+                'is_today' => $day->isSameDay($today),
+                'is_future' => $future,
+
+                /*
+                 | What the square is coloured by. Computed here so the app and
+                 | any dashboard cannot disagree about what a green dot means.
+                 |
+                 |   none    nothing was due
+                 |   future  due, but has not happened yet
+                 |   perfect everything due was done
+                 |   partial some done, some not
+                 |   missed  due, and nothing was done
+                 |   open    due today and still in play
+                 */
+                'state' => match (true) {
+                    $due === 0 => 'none',
+                    $future => 'future',
+                    $counted === 0 => $day->isSameDay($today) ? 'open' : 'missed',
+                    $done === $counted => 'perfect',
+                    $done === 0 => 'missed',
+                    default => 'partial',
+                },
+            ];
+        }
+
+        return [
+            'month' => $start->format('Y-m'),
+            'label' => $start->format('F Y'),
+            'starts_weekday' => $start->dayOfWeekIso,
+            'days_in_month' => $start->daysInMonth,
+
+            // So the client can put arrows on the header without guessing
+            // about month lengths or year boundaries.
+            'previous' => $start->subMonth()->format('Y-m'),
+            'next' => $start->addMonth()->format('Y-m'),
+
+            'done' => $monthDone,
+            'total' => $monthCounted,
+            'rate' => $monthCounted === 0
+                ? null
+                : (int) round($monthDone / $monthCounted * 100),
+
+            'days' => $days,
+        ];
+    }
+
     /*
     |--------------------------------------------------------------------------
     | Writing
