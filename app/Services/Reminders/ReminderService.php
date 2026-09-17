@@ -633,6 +633,7 @@ class ReminderService
         string $dueAt,
         string $status,
         ?string $dueLocal = null,
+        ?string $answeredAt = null,
     ): array {
         $reminder = Reminder::query()
             ->where('uuid', $uuid)
@@ -693,6 +694,34 @@ class ReminderService
             ? now()->addMinutes(max(1, $reminder->snooze_minutes))
             : null;
 
+        /*
+         | When the button was pressed, not when the server heard about it.
+         |
+         | The score is now weighted by how promptly somebody answered, so
+         | this timestamp is no longer decoration — it is the measurement. An
+         | answer given on a plane and delivered three hours later must score
+         | as the on-time answer it was, and `now()` would record it as three
+         | hours late.
+         |
+         | Clamped at both ends because it comes from a device clock: never
+         | before the occurrence was due, never in the future.
+         */
+        $answered = null;
+
+        if ($status === ReminderOccurrence::STATUS_DONE) {
+            $answered = $answeredAt !== null && $answeredAt !== ''
+                ? CarbonImmutable::parse($answeredAt)
+                : CarbonImmutable::now();
+
+            if ($answered->lessThan($at)) {
+                $answered = $at;
+            }
+
+            if ($answered->greaterThan(CarbonImmutable::now())) {
+                $answered = CarbonImmutable::now();
+            }
+        }
+
         $occurrence = ReminderOccurrence::updateOrCreate(
             [
                 'reminder_id' => $reminder->id,
@@ -702,9 +731,7 @@ class ReminderService
                 'user_id' => $user->id,
                 'due_on' => $at->toDateString(),
                 'status' => $status,
-                'completed_at' => $status === ReminderOccurrence::STATUS_DONE
-                    ? now()
-                    : null,
+                'completed_at' => $answered,
                 'snoozed_until' => $snoozeUntil,
             ],
         );
@@ -843,35 +870,258 @@ class ReminderService
      *
      * @return array<string, mixed>
      */
-    public function score(User $user, int $days = 30): array
+    /**
+     * Credit for one answered occurrence, from how promptly it was answered.
+     *
+     * Answering at the due minute is worth full marks. Every minute after that
+     * costs, on a straight line across the ring window, down to a floor of
+     * half marks — because an answered reminder, however late, is still a dose
+     * taken, and scoring it near zero would tell somebody their medicine did
+     * not count. Never answered is the only zero.
+     *
+     * This is what the client meant by "minute ke hisaab se scoring": the
+     * number moves with the minutes, not with a tick box.
+     */
+    public const RING_WINDOW_MINUTES = 10;
+
+    public const LATE_FLOOR = 0.5;
+
+    /** Answered inside this many minutes still counts as on time. */
+    public const GRACE_MINUTES = 1;
+
+    private function creditFor(ReminderOccurrence $row): float
     {
-        $days = max(1, min(365, $days));
+        if ($row->status !== ReminderOccurrence::STATUS_DONE) {
+            return 0.0;
+        }
+
+        $late = $this->delayMinutes($row);
+
+        if ($late <= self::GRACE_MINUTES) {
+            return 1.0;
+        }
+
+        $slide = (1.0 - self::LATE_FLOOR)
+            * (($late - self::GRACE_MINUTES) / self::RING_WINDOW_MINUTES);
+
+        return max(self::LATE_FLOOR, 1.0 - $slide);
+    }
+
+    /** Whole minutes between when it was due and when it was answered. */
+    private function delayMinutes(ReminderOccurrence $row): int
+    {
+        if ($row->completed_at === null) {
+            return 0;
+        }
+
+        return max(0, (int) floor(
+            $row->due_at->diffInSeconds($row->completed_at, false) / 60
+        ));
+    }
+
+    /**
+     * "3h 12m", "47m", "—".
+     */
+    private function clockLabel(int $minutes): string
+    {
+        if ($minutes <= 0) {
+            return '0m';
+        }
+
+        $hours = intdiv($minutes, 60);
+        $rest = $minutes % 60;
+
+        if ($hours === 0) {
+            return $rest.'m';
+        }
+
+        return $rest === 0 ? $hours.'h' : $hours.'h '.$rest.'m';
+    }
+
+    /**
+     * One month of attendance, as a screen full of numbers.
+     *
+     * Everything the score screen draws comes from this one call: the ring,
+     * the calendar grid, the twelve-month trend, the per-category split and
+     * the history beneath it. One call rather than five because they all have
+     * to agree — a calendar saying four missed days beside a ring saying 100%
+     * is worse than either on its own.
+     *
+     * @return array<string, mixed>
+     */
+    public function score(User $user, int $days = 30, ?string $month = null): array
+    {
+        $zone = Recurrence::safeZone($user->timezone);
         $now = $this->localNow($user);
-        $from = $now->subDays($days - 1)->startOfDay();
+
+        $anchor = $month !== null && $month !== ''
+            ? CarbonImmutable::parse($month.'-01', $zone)
+            : $now;
+
+        $start = $anchor->startOfMonth();
+        $end = $anchor->endOfMonth();
+
+        // Never count days that have not happened yet — a month in progress is
+        // scored on the part of it that has been lived.
+        $through = $end->greaterThan($now) ? $now : $end;
 
         $rows = ReminderOccurrence::query()
-            ->between($user->id, $from->toDateString(), $now->toDateString())
-            ->whereIn('status', ReminderOccurrence::COUNTED_STATUSES)
-            ->get(['due_on', 'status']);
+            ->between($user->id, $start->toDateString(), $through->toDateString())
+            ->with(['reminder', 'reminder.category'])
+            ->orderBy('due_at')
+            ->get();
 
-        $done = $rows->where('status', ReminderOccurrence::STATUS_DONE)->count();
-        $total = $rows->count();
+        $counted = $rows->filter(
+            fn (ReminderOccurrence $r) => in_array(
+                $r->status,
+                ReminderOccurrence::COUNTED_STATUSES,
+                true,
+            )
+        );
+
+        $done = $counted->where('status', ReminderOccurrence::STATUS_DONE);
+
+        $credit = 0.0;
+        $delay = 0;
+        $onTime = 0;
+
+        foreach ($done as $row) {
+            $credit += $this->creditFor($row);
+
+            $late = $this->delayMinutes($row);
+            $delay += $late;
+
+            if ($late <= self::GRACE_MINUTES) {
+                $onTime++;
+            }
+        }
+
+        $total = $counted->count();
 
         /*
-         | A day counts towards the streak when everything that came due on it
-         | was done. A perfect run of one reminder is still a perfect day —
-         | the streak is about answering what you were asked, not about how
-         | much you asked of yourself.
-         */
-        $byDay = $rows->groupBy(fn ($r) => $r->due_on->toDateString());
+        |----------------------------------------------------------------------
+        | The calendar grid
+        |----------------------------------------------------------------------
+        |
+        | Every square of the month, including the ones with nothing on them,
+        | so the client draws a grid rather than working out which days are
+        | missing. `state` is what colours the square.
+        */
+        $byDay = $rows->groupBy(fn (ReminderOccurrence $r) => $r->due_on->toDateString());
 
+        $daysOut = [];
+        $cursor = $start;
+        $tracked = 0;
+
+        while ($cursor->lessThanOrEqualTo($end)) {
+            $key = $cursor->toDateString();
+            $day = $byDay->get($key);
+
+            $dayCounted = $day?->filter(
+                fn (ReminderOccurrence $r) => in_array(
+                    $r->status,
+                    ReminderOccurrence::COUNTED_STATUSES,
+                    true,
+                )
+            );
+
+            $dayDue = $dayCounted?->count() ?? 0;
+            $dayDone = $dayCounted?->where('status', ReminderOccurrence::STATUS_DONE)->count() ?? 0;
+            $dayCredit = 0.0;
+            $dayDelay = 0;
+
+            if ($dayCounted !== null) {
+                foreach ($dayCounted as $row) {
+                    $dayCredit += $this->creditFor($row);
+                    $dayDelay += $this->delayMinutes($row);
+                }
+            }
+
+            if ($dayDue > 0) {
+                $tracked++;
+            }
+
+            $daysOut[] = [
+                'date' => $key,
+                'day' => $cursor->day,
+                // 1 = Monday, to match the grid's first column.
+                'weekday' => $cursor->dayOfWeekIso,
+                'due' => $dayDue,
+                'done' => $dayDone,
+                'missed' => $dayDue - $dayDone,
+                'rate' => $dayDue === 0 ? null : (int) round($dayCredit / $dayDue * 100),
+                'delay_minutes' => $dayDelay,
+                'is_today' => $cursor->isSameDay($now),
+                'is_future' => $cursor->greaterThan($now),
+                'state' => match (true) {
+                    $dayDue === 0 => 'none',
+                    $dayDone === 0 => 'missed',
+                    $dayDone < $dayDue => 'partial',
+                    $dayCredit >= $dayDue - 0.001 => 'perfect',
+                    default => 'late',
+                },
+            ];
+
+            $cursor = $cursor->addDay();
+        }
+
+        return [
+            'month' => $start->format('Y-m'),
+            'label' => $start->format('F Y'),
+            'prev' => $start->subMonth()->format('Y-m'),
+            'next' => $start->addMonth()->greaterThan($now)
+                ? null
+                : $start->addMonth()->format('Y-m'),
+
+            // The headline: punctuality-weighted, which is the one the client
+            // asked for. `completion` is the plain done/due beside it, because
+            // the gap between the two is exactly "you did it, but late".
+            'rate' => $total === 0 ? null : (int) round($credit / $total * 100),
+            'completion' => $total === 0
+                ? null
+                : (int) round($done->count() / $total * 100),
+
+            'streak' => $this->streakFor($user, $now, $byDay),
+
+            'totals' => [
+                'days_tracked' => $tracked,
+                'due' => $total,
+                'done' => $done->count(),
+                'missed' => $total - $done->count(),
+                'on_time' => $onTime,
+                'late' => $done->count() - $onTime,
+                'delay_minutes' => $delay,
+                'delay_label' => $this->clockLabel($delay),
+                'average_delay_label' => $done->count() === 0
+                    ? '0m'
+                    : $this->clockLabel((int) round($delay / $done->count())),
+            ],
+
+            'days' => $daysOut,
+            'trend' => $this->trendFor($user, $anchor, 6),
+            'categories' => $this->categorySplit($counted),
+            'history' => $this->historyFrom($rows, $zone),
+
+            // Kept for the older home-screen card, which asks in days.
+            'days_window' => max(1, min(365, $days)),
+        ];
+    }
+
+    /**
+     * Consecutive perfect days ending today.
+     *
+     * @param  \Illuminate\Support\Collection<string, mixed>  $byDay
+     */
+    private function streakFor(User $user, CarbonImmutable $now, $byDay): int
+    {
         $streak = 0;
         $cursor = $now->startOfDay();
 
-        while ($streak < $days) {
+        for ($i = 0; $i < 400; $i++) {
             $day = $byDay->get($cursor->toDateString());
 
-            // A day with nothing due neither breaks a streak nor extends it.
+            // A day with nothing due neither breaks a streak nor extends it —
+            // except today, which has not finished yet.
             if ($day === null) {
                 if ($cursor->isSameDay($now)) {
                     $cursor = $cursor->subDay();
@@ -882,7 +1132,9 @@ class ReminderService
                 break;
             }
 
-            if ($day->contains(fn ($r) => $r->status !== ReminderOccurrence::STATUS_DONE)) {
+            if ($day->contains(
+                fn (ReminderOccurrence $r) => $r->status === ReminderOccurrence::STATUS_MISSED
+            )) {
                 break;
             }
 
@@ -890,18 +1142,122 @@ class ReminderService
             $cursor = $cursor->subDay();
         }
 
-        return [
-            'days' => $days,
-            'from' => $from->toDateString(),
-            'to' => $now->toDateString(),
-            'done' => $done,
-            'total' => $total,
-            'rate' => $total === 0 ? null : (int) round($done / $total * 100),
-            'streak' => $streak,
-            'headline' => $total === 0
-                ? 'Nothing due yet'
-                : $done.' of '.$total.' done',
-        ];
+        return $streak;
+    }
+
+    /**
+     * The last N months, oldest first, for the bar chart.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function trendFor(User $user, CarbonImmutable $anchor, int $months): array
+    {
+        $out = [];
+
+        for ($i = $months - 1; $i >= 0; $i--) {
+            $m = $anchor->subMonths($i);
+
+            $rows = ReminderOccurrence::query()
+                ->between(
+                    $user->id,
+                    $m->startOfMonth()->toDateString(),
+                    $m->endOfMonth()->toDateString(),
+                )
+                ->whereIn('status', ReminderOccurrence::COUNTED_STATUSES)
+                ->get();
+
+            $credit = 0.0;
+
+            foreach ($rows as $row) {
+                $credit += $this->creditFor($row);
+            }
+
+            $out[] = [
+                'month' => $m->format('Y-m'),
+                'label' => $m->format('M'),
+                'due' => $rows->count(),
+                'rate' => $rows->count() === 0
+                    ? null
+                    : (int) round($credit / $rows->count() * 100),
+            ];
+        }
+
+        return $out;
+    }
+
+    /**
+     * Where the month went, by category — the pie.
+     *
+     * @param  \Illuminate\Support\Collection<int, ReminderOccurrence>  $counted
+     * @return list<array<string, mixed>>
+     */
+    private function categorySplit($counted): array
+    {
+        $groups = $counted->groupBy(
+            fn (ReminderOccurrence $r) => $r->reminder?->category?->key ?? 'other'
+        );
+
+        $out = [];
+
+        foreach ($groups as $key => $rows) {
+            $category = $rows->first()?->reminder?->category;
+
+            $credit = 0.0;
+
+            foreach ($rows as $row) {
+                $credit += $this->creditFor($row);
+            }
+
+            $out[] = [
+                'key' => $key,
+                'name' => $category?->name ?? 'Other',
+                'icon' => $category?->icon ?? 'alarm',
+                'colour_from' => $category?->colour_from ?? '#2F7BF0',
+                'colour_to' => $category?->colour_to ?? '#12A3E7',
+                'due' => $rows->count(),
+                'done' => $rows->where('status', ReminderOccurrence::STATUS_DONE)->count(),
+                'rate' => (int) round($credit / max(1, $rows->count()) * 100),
+            ];
+        }
+
+        usort($out, static fn ($a, $b) => $b['due'] <=> $a['due']);
+
+        return $out;
+    }
+
+    /**
+     * The list under the graph, newest first.
+     *
+     * @param  \Illuminate\Support\Collection<int, ReminderOccurrence>  $rows
+     * @return list<array<string, mixed>>
+     */
+    private function historyFrom($rows, string $zone): array
+    {
+        $out = [];
+
+        foreach ($rows->sortByDesc('due_at')->take(60) as $row) {
+            $due = $row->due_at->setTimezone($zone);
+            $late = $this->delayMinutes($row);
+
+            $out[] = [
+                'date' => $row->due_on->toDateString(),
+                'time' => $due->format('H:i'),
+                'title' => $row->reminder?->title ?? 'Reminder',
+                'category' => $row->reminder?->category?->name,
+                'colour_from' => $row->reminder?->category?->colour_from ?? '#2F7BF0',
+                'colour_to' => $row->reminder?->category?->colour_to ?? '#12A3E7',
+                'status' => $row->status,
+                'delay_minutes' => $row->status === ReminderOccurrence::STATUS_DONE
+                    ? $late
+                    : null,
+                'delay_label' => $row->status === ReminderOccurrence::STATUS_DONE
+                    ? ($late <= self::GRACE_MINUTES ? 'On time' : $this->clockLabel($late).' late')
+                    : null,
+                'credit' => (int) round($this->creditFor($row) * 100),
+            ];
+        }
+
+        return $out;
     }
 
     /*

@@ -813,10 +813,19 @@ class V1Controller extends Controller
      */
     public function reminderScore(Request $request): JsonResponse
     {
+        $month = (string) $request->input('month', '');
+
+        abort_if(
+            $month !== '' && preg_match('/^\d{4}-\d{2}$/', $month) !== 1,
+            422,
+            'A month looks like 2026-09.',
+        );
+
         return $this->ok(
             $this->reminders->score(
                 $request->user(),
                 (int) $request->integer('days', 30),
+                $month === '' ? null : $month,
             ),
             'OK',
         );
@@ -906,6 +915,11 @@ class V1Controller extends Controller
         // the instant on its own does not reliably name an occurrence.
         $dueLocal = (string) $request->input('due_local', '');
 
+        // When the button was actually pressed. Matters because the score is
+        // weighted by promptness — an answer that waited in the outbox for
+        // three hours was still an answer given on time.
+        $answeredAt = (string) $request->input('answered_at', '');
+
         abort_if($dueAt === '', 422, 'Say which occurrence.');
 
         return $this->ok(
@@ -915,6 +929,7 @@ class V1Controller extends Controller
                 $dueAt,
                 $status,
                 $dueLocal === '' ? null : $dueLocal,
+                $answeredAt === '' ? null : $answeredAt,
             ),
             match ($status) {
                 'done' => 'Marked done.',
