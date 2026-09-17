@@ -632,6 +632,7 @@ class ReminderService
         string $uuid,
         string $dueAt,
         string $status,
+        ?string $dueLocal = null,
     ): array {
         $reminder = Reminder::query()
             ->where('uuid', $uuid)
@@ -652,7 +653,26 @@ class ReminderService
         );
 
         $zone = Recurrence::safeZone($reminder->timezone);
-        $at = CarbonImmutable::parse($dueAt)->setTimezone($zone);
+
+        /*
+         | The wall clock the phone actually rang at, when it sends one.
+         |
+         | An instant alone is not enough to identify an occurrence, because it
+         | only means the same thing to both ends if they agree on the zone —
+         | and they do not always. A reminder saved before `timezone` was being
+         | filled in says UTC while the phone is in IST, so a Done pressed at
+         | 08:03 arrives as 02:33Z, the check below compares 02:33 against
+         | 08:03 and rejects it. The answer is then dropped as a 4xx and the
+         | nightly close-out writes the occurrence off as missed — the user
+         | pressed Done and watched it turn into a miss.
+         |
+         | `due_local` is the same "wall clock as well as the instant" that
+         | schedule() already sends in the other direction, and it makes the
+         | round trip agree no matter what the stored zone says.
+         */
+        $at = $dueLocal !== null && $dueLocal !== ''
+            ? CarbonImmutable::parse($dueLocal, $zone)
+            : CarbonImmutable::parse($dueAt)->setTimezone($zone);
 
         /*
          | The moment has to be one this rule actually produces.

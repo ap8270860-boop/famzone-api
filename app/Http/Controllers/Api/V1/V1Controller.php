@@ -901,10 +901,21 @@ class V1Controller extends Controller
         $dueAt = (string) $request->input('due_at', '');
         $status = (string) $request->input('status', '');
 
+        // The wall clock the alarm rang at, "2026-09-17 08:03". Optional, so
+        // an older build still settles — see ReminderService::settle for why
+        // the instant on its own does not reliably name an occurrence.
+        $dueLocal = (string) $request->input('due_local', '');
+
         abort_if($dueAt === '', 422, 'Say which occurrence.');
 
         return $this->ok(
-            $this->reminders->settle($request->user(), $uuid, $dueAt, $status),
+            $this->reminders->settle(
+                $request->user(),
+                $uuid,
+                $dueAt,
+                $status,
+                $dueLocal === '' ? null : $dueLocal,
+            ),
             match ($status) {
                 'done' => 'Marked done.',
                 'snoozed' => 'Snoozed.',
