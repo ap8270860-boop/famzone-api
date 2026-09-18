@@ -1478,7 +1478,84 @@ class LocationService
             'battery_level' => $user->battery_level,
             'recorded_at' => $at?->toIso8601String(),
             'age_seconds' => $at === null ? null : max(0, now()->diffInSeconds($at, true)),
+
+            /*
+             | Where they are heading, if anywhere.
+             |
+             | Carried on the position rather than beside it because it is read
+             | in exactly the same breath: the marker that says where somebody
+             | is should say where they are going in the same glance. Null for
+             | almost everybody almost always, which costs nothing.
+             */
+            'trip' => $this->presentTrip($user),
         ];
+    }
+
+    /**
+     * The live journey, or null.
+     *
+     * `eta_seconds` is derived here rather than stored, so a phone that lost
+     * signal for ten minutes comes back with an ETA ten minutes closer - which
+     * is the truth. A stored "12 minutes remaining" would still say twelve.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function presentTrip(User $user): ?array
+    {
+        if ($user->trip_lat === null || $user->trip_eta_at === null) {
+            return null;
+        }
+
+        $remaining = (int) round(now()->diffInSeconds($user->trip_eta_at, false));
+
+        return [
+            'label' => $user->trip_label,
+            'latitude' => (float) $user->trip_lat,
+            'longitude' => (float) $user->trip_lng,
+            'eta_at' => $user->trip_eta_at->toIso8601String(),
+
+            // Negative once they are late, and deliberately not clamped: "two
+            // minutes over" is information, and zero is not.
+            'eta_seconds' => $remaining,
+            'started_at' => $user->trip_started_at?->toIso8601String(),
+        ];
+    }
+
+    /**
+     * Start a journey, or replace the one in progress.
+     *
+     * @return array<string, mixed>
+     */
+    public function startTrip(
+        User $user,
+        string $label,
+        float $lat,
+        float $lng,
+        int $durationSeconds,
+    ): array {
+        $user->forceFill([
+            'trip_label' => mb_substr(trim($label), 0, 120),
+            'trip_lat' => $lat,
+            'trip_lng' => $lng,
+            'trip_eta_at' => now()->addSeconds(max(0, $durationSeconds)),
+            'trip_started_at' => now(),
+        ])->save();
+
+        return $this->presentTrip($user) ?? [];
+    }
+
+    /**
+     * Arrived, or gave up. Nothing is kept - see the migration for why.
+     */
+    public function endTrip(User $user): void
+    {
+        $user->forceFill([
+            'trip_label' => null,
+            'trip_lat' => null,
+            'trip_lng' => null,
+            'trip_eta_at' => null,
+            'trip_started_at' => null,
+        ])->save();
     }
 
     /*

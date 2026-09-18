@@ -549,6 +549,35 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
                 ->name('pin');
 
             /*
+             | Navigation.
+             |
+             | All four are literal segments and all four are declared ahead
+             | of `{uuid}` below, for the same reason `places` is: a parameter
+             | route placed first swallows them and produces a 404 that reads
+             | like a missing endpoint and is really a routing-order bug.
+             |
+             | `search` is typed into, so it is throttled for a debounced
+             | keystroke. `route` is not: each one can be a billed call to
+             | Google, and the sixty-second cache behind it means a tighter
+             | limit costs a user nothing and costs an abuser everything.
+             */
+            Route::get('search', [V1Controller::class, 'searchDestinations'])
+                ->middleware('throttle:60,1')
+                ->name('search');
+
+            Route::post('route', [V1Controller::class, 'routeTo'])
+                ->middleware('throttle:60,1')
+                ->name('route');
+
+            Route::post('trip/start', [V1Controller::class, 'startTrip'])
+                ->middleware('throttle:30,1')
+                ->name('trip.start');
+
+            Route::post('trip/end', [V1Controller::class, 'endTrip'])
+                ->middleware('throttle:30,1')
+                ->name('trip.end');
+
+            /*
              | Family places — the named circles behind "At School".
              |
              | Declared before the {uuid} route below for the usual reason:

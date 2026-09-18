@@ -142,6 +142,20 @@ class User extends Authenticatable
             'last_location_moving' => 'boolean',
             'battery_level' => 'integer',
 
+            /*
+             | The live journey. Cleared when it ends - see the migration for
+             | why there is no trip history here.
+             |
+             | `trip_eta_at` is cast because presentTrip() subtracts it from
+             | now() to produce the countdown; uncast it arrives as a string
+             | and the subtraction is a fatal rather than a wrong number,
+             | which is at least honest but happens on the map screen.
+             */
+            'trip_lat' => 'decimal:7',
+            'trip_lng' => 'decimal:7',
+            'trip_eta_at' => 'datetime',
+            'trip_started_at' => 'datetime',
+
             'last_sos_at' => 'datetime',
 
             'push_enabled' => 'boolean',

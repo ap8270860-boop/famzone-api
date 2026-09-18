@@ -52,6 +52,7 @@ use App\Services\Chat\ThreadSettingsService;
 use App\Services\Location\FamilyPlaceService;
 use App\Services\Location\LocationHistoryService;
 use App\Services\Location\LocationService;
+use App\Services\Location\RoutingService;
 use App\Services\Otp\Exceptions\OtpException;
 use App\Services\Otp\OtpService;
 use App\Services\Posts\PostService;
@@ -115,6 +116,10 @@ class V1Controller extends Controller
         // the Google Places proxy — see FamilyPlaceService's own note.
         private readonly FamilyPlaceService $familyPlaces,
         private readonly LocationHistoryService $history,
+
+        // Google's Routes API, proxied. Same key and same rule as $places
+        // below: it is IP-restricted to this box and never ships in a build.
+        private readonly RoutingService $routing,
 
         // Reminders. Nothing in this service makes a phone ring — the device
         // reads these rows and registers real OS alarms against them.
@@ -2118,6 +2123,150 @@ class V1Controller extends Controller
             $validated['month'],
             (int) ($validated['offset'] ?? 0),
         ), 'OK');
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Navigation
+    |--------------------------------------------------------------------------
+    |
+    | Somewhere to go, a line to get there, and a note to the family that you
+    | are on your way.
+    |
+    | Deliberately not a fourth endpoint: there is no turn-by-turn here. The
+    | field mask in RoutingService is what keeps every request on the Basic
+    | tier, and step-by-step manoeuvres would move the whole feature onto
+    | Advanced billing for a screen nobody asked for.
+    */
+
+    /**
+     * GET /api/v1/location/search?q=vashi+station&latitude=&longitude=
+     *
+     * The same Places proxy the SOS screen uses, biased towards wherever the
+     * caller is standing rather than restricted to it - somebody typing
+     * "station" wants the near one first but should still find the one they
+     * actually meant.
+     *
+     * Called on each keystroke behind a client-side debounce, so the throttle
+     * is loose and the cache underneath it does the real work: one paid
+     * lookup answers the same query for everybody nearby for a week.
+     */
+    public function searchDestinations(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'q' => ['required', 'string', 'min:2', 'max:120'],
+            'latitude' => ['nullable', 'numeric', 'between:-90,90'],
+            'longitude' => ['nullable', 'numeric', 'between:-180,180'],
+        ]);
+
+        $lat = isset($validated['latitude']) ? (float) $validated['latitude'] : null;
+        $lng = isset($validated['longitude']) ? (float) $validated['longitude'] : null;
+
+        $places = $this->places->search($validated['q'], $lat, $lng);
+
+        return $this->ok([
+            'places' => $places,
+            'available' => $this->places->configured(),
+
+            // Why the list is empty, when it is empty. "No results" and "the
+            // key is not enabled" look identical from the app otherwise, and
+            // the second one is a thing somebody has to go and fix.
+            'reason' => $places === [] ? $this->places->failure() : null,
+        ], 'OK');
+    }
+
+    /**
+     * POST /api/v1/location/route
+     *   { from_latitude, from_longitude, to_latitude, to_longitude, mode? }
+     *
+     * A distance, a duration, and an encoded polyline to draw. Nothing else.
+     *
+     * The origin comes from the request rather than from the caller's last
+     * stored fix, because the phone's current reading is seconds old and the
+     * stored one can be minutes old - and a route that starts a street behind
+     * you is worse than no route.
+     *
+     * A failure here is a 422 carrying the reason in plain words, not a 500:
+     * every way this can fail is something a person can act on.
+     */
+    public function routeTo(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'from_latitude' => ['required', 'numeric', 'between:-90,90'],
+            'from_longitude' => ['required', 'numeric', 'between:-180,180'],
+            'to_latitude' => ['required', 'numeric', 'between:-90,90'],
+            'to_longitude' => ['required', 'numeric', 'between:-180,180'],
+            'mode' => ['nullable', 'string', 'in:'.implode(',', RoutingService::MODES)],
+        ]);
+
+        $route = $this->routing->route(
+            (float) $validated['from_latitude'],
+            (float) $validated['from_longitude'],
+            (float) $validated['to_latitude'],
+            (float) $validated['to_longitude'],
+            (string) ($validated['mode'] ?? 'DRIVE'),
+        );
+
+        if ($route === null) {
+            return $this->fail(
+                $this->routing->failure() ?? 'We could not work out a route.',
+                null,
+                422,
+            );
+        }
+
+        return $this->ok($route, 'OK');
+    }
+
+    /**
+     * POST /api/v1/location/trip/start
+     *   { label, latitude, longitude, duration_seconds }
+     *
+     * Announce a journey. This is what turns a family marker from "Aisha" into
+     * "Aisha - on the way to Dadar, 12 min".
+     *
+     * Starting a second one replaces the first rather than erroring: a person
+     * who changes their mind about where they are going has not made a
+     * mistake, and refusing them would leave a stale destination on the map.
+     *
+     * Nothing is broadcast from here. The trip rides along on the next
+     * position ping, which is never more than thirty seconds away and is
+     * already going to every viewer - a second socket event for the same
+     * change would only race the first.
+     */
+    public function startTrip(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'label' => ['required', 'string', 'max:120'],
+            'latitude' => ['required', 'numeric', 'between:-90,90'],
+            'longitude' => ['required', 'numeric', 'between:-180,180'],
+
+            // A day's ceiling. Anything longer is a bad ETA rather than a long
+            // journey, and an ETA three days out would sit on the map forever.
+            'duration_seconds' => ['required', 'integer', 'between:0,86400'],
+        ]);
+
+        return $this->ok($this->locations->startTrip(
+            $request->user(),
+            (string) $validated['label'],
+            (float) $validated['latitude'],
+            (float) $validated['longitude'],
+            (int) $validated['duration_seconds'],
+        ), 'On your way.');
+    }
+
+    /**
+     * POST /api/v1/location/trip/end
+     *
+     * Arrived, or gave up. Idempotent - ending a trip that is not running is
+     * a no-op, which matters because this is what the app calls on the way
+     * out of the navigation screen whether or not one was ever started.
+     */
+    public function endTrip(Request $request): JsonResponse
+    {
+        $this->locations->endTrip($request->user());
+
+        return $this->ok(['trip' => null], 'Trip ended.');
     }
 
     /*
